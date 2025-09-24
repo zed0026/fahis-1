@@ -6,7 +6,10 @@ export const useSocket = () => {
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const newSocket = io('http://localhost:5000');
+    const token = localStorage.getItem('c2_token');
+    const newSocket = io('http://localhost:5000', {
+      auth: { token }
+    });
     
     newSocket.on('connect', () => {
       console.log('Connected to server');

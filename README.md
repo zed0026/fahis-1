@@ -141,6 +141,26 @@ Root `package.json`:
 - `npm run build` → Build React app
 - `npm run install-all` → Install root and client dependencies
 
+### Credentials management
+
+- Set or update admin credentials:
+
+```bash
+node credential.js set <username> <password>
+```
+
+- Delete a user:
+
+```bash
+node credential.js delete <username>
+```
+
+- List users:
+
+```bash
+node credential.js list
+```
+
 Client `package.json`:
 
 - `npm start` → React dev server (CRA)
@@ -166,6 +186,15 @@ Both folders and the DB are created at first run if missing.
   - Access the UI via `http://localhost:3000` and keep the server on `http://localhost:5000`.
 - Port conflicts:
   - Set a different `PORT` env var when starting the server, e.g. `PORT=5050 npm start`.
+
+---
+
+## Authentication
+
+- The server exposes `POST /api/login` for obtaining a JWT.
+- Use `node credential.js set <user> <pass>` to create the first user.
+- The React app shows a login screen. On success, the token is saved in `localStorage` as `c2_token`.
+- Socket.IO connections include the token in `auth.token`.
 
 ---
 

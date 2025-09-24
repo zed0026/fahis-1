@@ -9,6 +9,8 @@ const path = require('path');
 const net = require('net');
 const { v4: uuidv4 } = require('uuid');
 const moment = require('moment');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
 const app = express();
 const server = http.createServer(app);
@@ -45,6 +47,7 @@ const initSqlJs = require('sql.js');
 const dbPath = path.join(__dirname, 'c2.sqlite');
 let SQL = null;
 let db = null;
+const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret';
 
 async function loadDb() {
   if (!SQL) {
@@ -57,8 +60,11 @@ async function loadDb() {
     } else {
       db = new SQL.Database();
       db.run(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      db.run(`CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, passwordHash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin');`);
       persistDb();
     }
+    // Ensure tables exist when upgrading
+    db.run(`CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, passwordHash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin');`);
   }
 }
 
@@ -267,6 +273,63 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
   const tcpPort = Number(process.env.TCP_PORT || s.serverPort || 2026);
   await startTcpServer(tcpHost, tcpPort);
 })();
+
+// ---- Auth helpers ----
+function getUser(username) {
+  const stmt = db.prepare('SELECT username, passwordHash, role FROM users WHERE username = ?');
+  const row = stmt.getAsObject([username]);
+  if (!row || !row.username) return null;
+  return row;
+}
+
+function requireAuth(req, res, next) {
+  const header = req.headers['authorization'] || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Missing token' });
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = payload;
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+// Public login endpoint
+app.post('/api/login', async (req, res) => {
+  await loadDb();
+  const body = req.body || {};
+  const username = body.username || '';
+  const password = body.password || '';
+  if (!username || !password) return res.status(400).json({ error: 'username and password required' });
+  const user = getUser(username);
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  const ok = bcrypt.compareSync(password, user.passwordHash);
+  if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+  const token = jwt.sign({ sub: user.username, role: user.role }, JWT_SECRET, { expiresIn: '12h' });
+  res.json({ token });
+});
+
+// Protect API routes after this middleware
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/') && req.path !== '/api/login') {
+    return requireAuth(req, res, next);
+  }
+  return next();
+});
+
+// Socket authentication
+io.use((socket, next) => {
+  const token = socket.handshake && socket.handshake.auth && socket.handshake.auth.token;
+  if (!token) return next(new Error('Unauthorized'));
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    socket.user = payload;
+    return next();
+  } catch (e) {
+    return next(new Error('Unauthorized'));
+  }
+});
 
 // WebSocket connections for GUI
 io.on('connection', (socket) => {

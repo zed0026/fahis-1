@@ -4,6 +4,7 @@ import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
 import Header from './components/Header';
+import Login from './components/Login';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import Clients from './components/Clients';
@@ -21,6 +22,7 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedClient, setSelectedClient] = useState(null);
+  const [token, setToken] = useState(() => localStorage.getItem('c2_token') || '');
 
   const socket = useSocket();
   const { clients, loading, error } = useClients(socket);
@@ -56,6 +58,10 @@ function App() {
         return <Dashboard clients={clients} onClientSelect={handleClientSelect} />;
     }
   };
+
+  if (!token) {
+    return <Login onLoggedIn={(t) => setToken(t)} />;
+  }
 
   return (
     <Router>
