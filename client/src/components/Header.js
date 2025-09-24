@@ -1,6 +1,6 @@
 import React from 'react';
 import styled from 'styled-components';
-import { FiMenu, FiWifi, FiWifiOff, FiUser, FiMonitor } from 'react-icons/fi';
+import { FiMenu, FiWifi, FiWifiOff, FiUser, FiMonitor, FiLogOut } from 'react-icons/fi';
 import { useState } from 'react';
 
 const HeaderContainer = styled.header`
@@ -116,11 +116,30 @@ const ViewTitle = styled.div`
   text-transform: capitalize;
 `;
 
+const LogoutButton = styled.button`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #333;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: #444;
+  }
+`;
+
 const Header = ({ 
   onToggleSidebar, 
   sidebarOpen, 
   currentView, 
-  selectedClient 
+  selectedClient,
+  onLogout
 }) => {
   const [connected, setConnected] = useState (true); // This would come from socket connection
 
@@ -159,6 +178,10 @@ const Header = ({
             </div>
           </ClientInfo>
         )}
+
+        <LogoutButton onClick={onLogout} title="Logout">
+          <FiLogOut /> Logout
+        </LogoutButton>
       </RightSection>
     </HeaderContainer>
   );

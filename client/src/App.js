@@ -71,6 +71,10 @@ function App() {
           sidebarOpen={sidebarOpen}
           currentView={currentView}
           selectedClient={selectedClient}
+          onLogout={() => {
+            try { localStorage.removeItem('c2_token'); } catch (e) {}
+            setToken('');
+          }}
         />
         
         <div className="main-content" style={{ display: 'flex', height: 'calc(100vh - 60px)', marginTop: '60px' }}>
