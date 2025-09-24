@@ -238,11 +238,12 @@ function createTcpServer() {
 function startTcpServer(host, port) {
   return new Promise((resolve, reject) => {
     const srv = createTcpServer();
+    // Attach error handler BEFORE listen to avoid race on immediate DNS errors
+    srv.on('error', reject);
     srv.listen(port, host, () => {
       console.log(`[TCP] Server listening on ${host}:${port}`);
       resolve();
     });
-    srv.on('error', reject);
   });
 }
 
@@ -262,7 +263,16 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
     await new Promise((r) => tcpServer.close(r));
     tcpServer = null;
   }
-  await startTcpServer(newHost, newPort);
+  try {
+    await startTcpServer(newHost, newPort);
+  } catch (e) {
+    if (e && (e.code === 'ENOTFOUND' || e.code === 'EADDRNOTAVAIL')) {
+      console.warn(`[TCP] Failed to bind to ${newHost}:${newPort} (${e.code}). Falling back to 0.0.0.0`);
+      await startTcpServer('0.0.0.0', newPort);
+    } else {
+      throw e;
+    }
+  }
 }
 
 // Start TCP server with settings (env overrides allowed)
@@ -271,7 +281,16 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
   const s = getAllSettings();
   const tcpHost = process.env.TCP_HOST || s.serverHost || '0.0.0.0';
   const tcpPort = Number(process.env.TCP_PORT || s.serverPort || 2026);
-  await startTcpServer(tcpHost, tcpPort);
+  try {
+    await startTcpServer(tcpHost, tcpPort);
+  } catch (e) {
+    if (e && (e.code === 'ENOTFOUND' || e.code === 'EADDRNOTAVAIL')) {
+      console.warn(`[TCP] Failed to bind to ${tcpHost}:${tcpPort} (${e.code}). Falling back to 0.0.0.0`);
+      await startTcpServer('0.0.0.0', tcpPort);
+    } else {
+      throw e;
+    }
+  }
 })();
 
 // ---- Auth helpers ----
