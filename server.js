@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -13,7 +14,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "http://localhost:3000",
+    origin: process.env.CORS_ORIGIN || "http://localhost:3000",
     methods: ["GET", "POST"]
   }
 });
@@ -106,10 +107,25 @@ function setSettings(partial) {
   persistDb();
 }
 
+function ensureDefaultSettings() {
+  // Insert defaults only for missing keys
+  const existing = new Set();
+  const stmt = db.prepare('SELECT key FROM settings');
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    if (row && row.key) existing.add(row.key);
+  }
+  const missing = {};
+  Object.entries(defaultSettings).forEach(([k, v]) => {
+    if (!existing.has(k)) missing[k] = v;
+  });
+  if (Object.keys(missing).length > 0) setSettings(missing);
+}
+
 // Initialize DB before using
 (async () => {
   await loadDb();
-  setSettings(defaultSettings);
+  ensureDefaultSettings();
 })();
 
 // TCP Server for Go clients
@@ -236,11 +252,13 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
   await startTcpServer(newHost, newPort);
 }
 
-// Start TCP server with settings
+// Start TCP server with settings (env overrides allowed)
 (async () => {
   await loadDb();
   const s = getAllSettings();
-  await startTcpServer(s.serverHost || '0.0.0.0', s.serverPort || 2026);
+  const tcpHost = process.env.TCP_HOST || s.serverHost || '0.0.0.0';
+  const tcpPort = Number(process.env.TCP_PORT || s.serverPort || 2026);
+  await startTcpServer(tcpHost, tcpPort);
 })();
 
 // WebSocket connections for GUI
@@ -433,8 +451,9 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
 });
 
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`[HTTP] Server running on port ${PORT}`);
-  console.log(`[GUI] Access the C2 interface at: http://localhost:${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0';
+const PORT = Number(process.env.PORT || 5000);
+server.listen(PORT, HOST, () => {
+  console.log(`[HTTP] Server running on ${HOST}:${PORT}`);
+  console.log(`[GUI] Access the C2 interface at: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
 });
