@@ -241,9 +241,16 @@ function startTcpServer(host, port) {
 }
 
 async function restartTcpServerIfNeeded(newHost, newPort) {
-  const addr = tcpServer?.address?.();
-  const currentHost = addr?.address || '0.0.0.0';
-  const currentPort = addr?.port || null;
+  let addr = null;
+  if (tcpServer && typeof tcpServer.address === 'function') {
+    try {
+      addr = tcpServer.address();
+    } catch (e) {
+      addr = null;
+    }
+  }
+  const currentHost = (addr && addr.address) ? addr.address : '0.0.0.0';
+  const currentPort = (addr && addr.port) ? addr.port : null;
   if (currentPort === newPort && currentHost === newHost) return;
   if (tcpServer) {
     await new Promise((r) => tcpServer.close(r));
