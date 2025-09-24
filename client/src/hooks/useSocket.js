@@ -7,7 +7,8 @@ export const useSocket = () => {
 
   useEffect(() => {
     const token = localStorage.getItem('c2_token');
-    const newSocket = io('http://localhost:5000', {
+    const origin = window.location.origin || 'http://localhost:5000';
+    const newSocket = io(origin, {
       auth: { token }
     });
     

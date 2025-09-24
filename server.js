@@ -14,9 +14,14 @@ const bcrypt = require('bcryptjs');
 
 const app = express();
 const server = http.createServer(app);
+const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000")
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+    origin: allowedOrigins.length > 1 ? allowedOrigins : allowedOrigins[0],
     methods: ["GET", "POST"]
   }
 });
