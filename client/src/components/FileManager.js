@@ -343,13 +343,22 @@ const FileManager = ({ client, socket }) => {
 
   const loadCurrentDirectory = () => {
     if (!client || !socket) return;
-    
     setLoading(true);
     commandResponseRef.current = (response) => {
-      parseDirectoryResponse(response);
-      setLoading(false);
+      try {
+        const path = String(response || '').trim();
+        if (!path) {
+          setLoading(false);
+          return;
+        }
+        setCurrentPath(path);
+        updateBreadcrumbs(path);
+        // Chain: now list files in this directory
+        loadFiles(path);
+      } catch (e) {
+        setLoading(false);
+      }
     };
-    
     socket.emit('executeCommand', {
       clientId: client.id,
       command: 'pwd'
@@ -386,8 +395,8 @@ const FileManager = ({ client, socket }) => {
         }
       }
 
-      if (!path && targetPath) {
-        path = targetPath;
+      if (!path) {
+        path = targetPath || currentPath || '';
       }
 
       // Parse file entries
@@ -414,7 +423,7 @@ const FileManager = ({ client, socket }) => {
         }
       }
 
-      setCurrentPath(path);
+      if (path) setCurrentPath(path);
       setFiles(fileList);
       updateBreadcrumbs(path);
     } catch (error) {
