@@ -387,7 +387,16 @@ const FileManager = ({ client, socket }) => {
     
     setLoading(true);
     // Step 1: cd into the path (if provided)
-    const targetPath = path || currentPath;
+    let targetPath = path || currentPath;
+    // Normalize Windows drive roots and slashes
+    if (osType.includes('windows')) {
+      if (typeof targetPath === 'string') {
+        targetPath = targetPath.trim().replace(/\//g, '\\');
+        if (/^[a-zA-Z]:$/.test(targetPath)) {
+          targetPath = `${targetPath}\\`;
+        }
+      }
+    }
     const sendList = () => {
       commandResponseRef.current = (response) => {
         parseDirectoryResponse(response, targetPath);
