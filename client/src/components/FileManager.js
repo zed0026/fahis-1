@@ -318,6 +318,7 @@ const FileManager = ({ client, socket }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
   const [breadcrumbs, setBreadcrumbs] = useState([]);
+  const [osType, setOsType] = useState('unknown');
   const commandResponseRef = useRef(null);
 
   // Listen for command responses
@@ -337,9 +338,26 @@ const FileManager = ({ client, socket }) => {
   // Initialize file manager when client is selected
   useEffect(() => {
     if (client && socket) {
-      loadCurrentDirectory();
+      // Fetch OS info first to choose safe defaults
+      fetchOsInfo(() => loadCurrentDirectory());
     }
   }, [client, socket]);
+
+  const fetchOsInfo = (next) => {
+    if (!socket || !client) return next && next();
+    const handler = (data) => {
+      if (data.clientId !== client.id) return;
+      const text = String(data.response || '');
+      const match = text.match(/OS:\s*(\S+)/i);
+      if (match && match[1]) {
+        setOsType(match[1].toLowerCase());
+      }
+      socket.off('commandResponse', handler);
+      next && next();
+    };
+    socket.on('commandResponse', handler);
+    socket.emit('executeCommand', { clientId: client.id, command: 'sysinfo' });
+  };
 
   const loadCurrentDirectory = () => {
     if (!client || !socket) return;
@@ -347,14 +365,13 @@ const FileManager = ({ client, socket }) => {
     commandResponseRef.current = (response) => {
       try {
         const path = String(response || '').trim();
-        if (!path) {
-          setLoading(false);
-          return;
-        }
-        setCurrentPath(path);
-        updateBreadcrumbs(path);
+        const invalid = !path || /^Command failed/i.test(path);
+        const defaultPath = osType.includes('windows') ? 'C:\\' : '/';
+        const nextPath = invalid ? defaultPath : path;
+        setCurrentPath(nextPath);
+        updateBreadcrumbs(nextPath);
         // Chain: now list files in this directory
-        loadFiles(path);
+        loadFiles(nextPath);
       } catch (e) {
         setLoading(false);
       }
@@ -415,7 +432,7 @@ const FileManager = ({ client, socket }) => {
                 isDirectory: type === '<DIR>',
                 size: size,
                 modified: modified,
-                path: path ? `${path}/${name}`.replace('//', '/') : name,
+                path: buildPath(path, name),
                 type: getFileType(name)
               });
             }
@@ -431,6 +448,16 @@ const FileManager = ({ client, socket }) => {
       toast.error('Failed to parse directory listing');
       setFiles([]);
     }
+  };
+
+  const getSep = () => (osType.includes('windows') ? '\\' : '/');
+
+  const buildPath = (base, name) => {
+    const sep = getSep();
+    if (!base) return name;
+    // If base already ends with sep, avoid double
+    const normalized = base.endsWith(sep) ? base.slice(0, -1) : base;
+    return `${normalized}${sep}${name}`;
   };
 
   const getFileType = (filename) => {
@@ -487,16 +514,17 @@ const FileManager = ({ client, socket }) => {
       return;
     }
 
-    const parts = path.split('/').filter(p => p !== '');
+    const sep = getSep();
+    const parts = path.split(sep).filter(p => p !== '');
     const crumbs = [];
     
     // Add root
-    crumbs.push({ name: 'Root', path: '/' });
+    crumbs.push({ name: 'Root', path: osType.includes('windows') ? 'C:\\' : '/' });
     
     // Add path parts
-    let currentPath = '';
+    let currentPath = osType.includes('windows') ? 'C:\\' : '';
     for (const part of parts) {
-      currentPath += (currentPath ? '/' : '') + part;
+      currentPath += (currentPath && !currentPath.endsWith(getSep()) ? getSep() : '') + part;
       crumbs.push({ name: part, path: currentPath });
     }
     
