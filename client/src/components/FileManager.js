@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import styled from 'styled-components';
 import { 
   FiFolder, 
@@ -13,7 +13,14 @@ import {
   FiHome,
   FiArrowLeft,
   FiCopy,
-  FiEdit
+  FiEdit,
+  FiFileText,
+  FiImage,
+  FiMusic,
+  FiVideo,
+  FiArchive,
+  FiCode,
+  FiDatabase
 } from 'react-icons/fi';
 import { toast } from 'react-toastify';
 
@@ -51,6 +58,15 @@ const Breadcrumb = styled.div`
 
   .separator {
     color: #666;
+  }
+`;
+
+const BreadcrumbItem = styled.span`
+  cursor: pointer;
+  color: #00ff88;
+  
+  &:hover {
+    text-decoration: underline;
   }
 `;
 
@@ -104,6 +120,11 @@ const ActionButton = styled.button`
     &:hover {
       transform: translateY(-1px);
     }
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 `;
 
@@ -169,7 +190,7 @@ const FileItem = styled.div`
 
 const FileIcon = styled.div`
   font-size: 32px;
-  color: #00ff88;
+  color: ${props => props.color || '#00ff88'};
   margin-bottom: 8px;
 `;
 
@@ -211,7 +232,7 @@ const FileRow = styled.div`
 
 const FileRowIcon = styled.div`
   font-size: 20px;
-  color: #00ff88;
+  color: ${props => props.color || '#00ff88'};
   width: 24px;
   text-align: center;
 `;
@@ -271,27 +292,226 @@ const EmptyState = styled.div`
   }
 `;
 
+const LoadingSpinner = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: #666;
+  font-size: 14px;
+  gap: 10px;
+
+  .spinner {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+`;
+
 const FileManager = ({ client, socket }) => {
-  const [currentPath, setCurrentPath] = useState('/');
+  const [currentPath, setCurrentPath] = useState('');
   const [files, setFiles] = useState([]);
-  const [viewMode, setViewMode] = useState('grid');
+  const [viewMode, setViewMode] = useState('list');
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
+  const [breadcrumbs, setBreadcrumbs] = useState([]);
+  const commandResponseRef = useRef(null);
 
+  // Listen for command responses
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleCommandResponse = (data) => {
+      if (data.clientId === client?.id && commandResponseRef.current) {
+        commandResponseRef.current(data.response);
+      }
+    };
+
+    socket.on('commandResponse', handleCommandResponse);
+    return () => socket.off('commandResponse', handleCommandResponse);
+  }, [socket, client]);
+
+  // Initialize file manager when client is selected
   useEffect(() => {
     if (client && socket) {
-      loadFiles();
+      loadCurrentDirectory();
     }
-  }, [client, socket, currentPath]);
+  }, [client, socket]);
 
-  const loadFiles = () => {
+  const loadCurrentDirectory = () => {
     if (!client || !socket) return;
     
     setLoading(true);
+    commandResponseRef.current = (response) => {
+      parseDirectoryResponse(response);
+      setLoading(false);
+    };
+    
     socket.emit('executeCommand', {
       clientId: client.id,
-      command: `dir "${currentPath}"`
+      command: 'pwd'
     });
+  };
+
+  const loadFiles = (path = '') => {
+    if (!client || !socket) return;
+    
+    setLoading(true);
+    commandResponseRef.current = (response) => {
+      parseDirectoryResponse(response, path);
+      setLoading(false);
+    };
+    
+    const command = path ? `ls "${path}"` : 'ls';
+    socket.emit('executeCommand', {
+      clientId: client.id,
+      command: command
+    });
+  };
+
+  const parseDirectoryResponse = (response, targetPath = '') => {
+    try {
+      const lines = response.split('\n');
+      let path = '';
+      let fileList = [];
+
+      // Extract directory path from first line
+      for (const line of lines) {
+        if (line.startsWith('Directory:')) {
+          path = line.replace('Directory:', '').trim();
+          break;
+        }
+      }
+
+      if (!path && targetPath) {
+        path = targetPath;
+      }
+
+      // Parse file entries
+      for (const line of lines) {
+        if (line.includes('\t') && (line.includes('<DIR>') || line.includes('FILE'))) {
+          const parts = line.split('\t');
+          if (parts.length >= 4) {
+            const type = parts[0].trim();
+            const name = parts[1].trim();
+            const size = parts[2].trim();
+            const modified = parts[3].trim();
+
+            if (name && name !== '') {
+              fileList.push({
+                name: name,
+                isDirectory: type === '<DIR>',
+                size: size,
+                modified: modified,
+                path: path ? `${path}/${name}`.replace('//', '/') : name,
+                type: getFileType(name)
+              });
+            }
+          }
+        }
+      }
+
+      setCurrentPath(path);
+      setFiles(fileList);
+      updateBreadcrumbs(path);
+    } catch (error) {
+      console.error('Error parsing directory response:', error);
+      toast.error('Failed to parse directory listing');
+      setFiles([]);
+    }
+  };
+
+  const getFileType = (filename) => {
+    const ext = filename.toLowerCase().split('.').pop();
+    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'ico'];
+    const videoExts = ['mp4', 'avi', 'mov', 'wmv', 'flv', 'webm', 'mkv'];
+    const audioExts = ['mp3', 'wav', 'flac', 'aac', 'ogg', 'wma'];
+    const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2'];
+    const codeExts = ['js', 'ts', 'html', 'css', 'py', 'java', 'cpp', 'c', 'go', 'php'];
+    const docExts = ['txt', 'doc', 'docx', 'pdf', 'rtf'];
+
+    if (imageExts.includes(ext)) return 'image';
+    if (videoExts.includes(ext)) return 'video';
+    if (audioExts.includes(ext)) return 'audio';
+    if (archiveExts.includes(ext)) return 'archive';
+    if (codeExts.includes(ext)) return 'code';
+    if (docExts.includes(ext)) return 'document';
+    return 'file';
+  };
+
+  const getFileIcon = (file) => {
+    if (file.isDirectory) {
+      return <FiFolder />;
+    }
+
+    switch (file.type) {
+      case 'image': return <FiImage />;
+      case 'video': return <FiVideo />;
+      case 'audio': return <FiMusic />;
+      case 'archive': return <FiArchive />;
+      case 'code': return <FiCode />;
+      case 'document': return <FiFileText />;
+      default: return <FiFile />;
+    }
+  };
+
+  const getFileIconColor = (file) => {
+    if (file.isDirectory) return '#ffc107';
+    
+    switch (file.type) {
+      case 'image': return '#28a745';
+      case 'video': return '#dc3545';
+      case 'audio': return '#6f42c1';
+      case 'archive': return '#fd7e14';
+      case 'code': return '#17a2b8';
+      case 'document': return '#6c757d';
+      default: return '#00ff88';
+    }
+  };
+
+  const updateBreadcrumbs = (path) => {
+    if (!path) {
+      setBreadcrumbs([]);
+      return;
+    }
+
+    const parts = path.split('/').filter(p => p !== '');
+    const crumbs = [];
+    
+    // Add root
+    crumbs.push({ name: 'Root', path: '/' });
+    
+    // Add path parts
+    let currentPath = '';
+    for (const part of parts) {
+      currentPath += (currentPath ? '/' : '') + part;
+      crumbs.push({ name: part, path: currentPath });
+    }
+    
+    setBreadcrumbs(crumbs);
+  };
+
+  const navigateToPath = (path) => {
+    setCurrentPath(path);
+    loadFiles(path);
+  };
+
+  const goBack = () => {
+    if (breadcrumbs.length > 1) {
+      const parentPath = breadcrumbs[breadcrumbs.length - 2].path;
+      navigateToPath(parentPath);
+    }
+  };
+
+  const handleFileClick = (file) => {
+    if (file.isDirectory) {
+      navigateToPath(file.path);
+    } else {
+      handleFileDownload(file.name);
+    }
   };
 
   const handleFileUpload = () => {
@@ -318,15 +538,6 @@ const FileManager = ({ client, socket }) => {
     toast.success(`Downloading ${fileName}...`);
   };
 
-  const navigateToPath = (path) => {
-    setCurrentPath(path);
-  };
-
-  const goBack = () => {
-    const parentPath = currentPath.split('/').slice(0, -1).join('/') || '/';
-    setCurrentPath(parentPath);
-  };
-
   const filteredFiles = files.filter(file => 
     file.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
@@ -349,8 +560,14 @@ const FileManager = ({ client, socket }) => {
         <HeaderLeft>
           <Breadcrumb>
             <FiHome />
-            <span className="separator">/</span>
-            <span>{currentPath}</span>
+            {breadcrumbs.map((crumb, index) => (
+              <React.Fragment key={index}>
+                <span className="separator">/</span>
+                <BreadcrumbItem onClick={() => navigateToPath(crumb.path)}>
+                  {crumb.name}
+                </BreadcrumbItem>
+              </React.Fragment>
+            ))}
           </Breadcrumb>
         </HeaderLeft>
         
@@ -360,7 +577,7 @@ const FileManager = ({ client, socket }) => {
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
-          <ActionButton onClick={loadFiles}>
+          <ActionButton onClick={loadCurrentDirectory} disabled={loading}>
             <FiRefreshCw />
             Refresh
           </ActionButton>
@@ -368,7 +585,7 @@ const FileManager = ({ client, socket }) => {
       </Header>
 
       <Toolbar>
-        <ActionButton onClick={goBack}>
+        <ActionButton onClick={goBack} disabled={breadcrumbs.length <= 1}>
           <FiArrowLeft />
           Back
         </ActionButton>
@@ -398,10 +615,10 @@ const FileManager = ({ client, socket }) => {
 
       <FileArea>
         {loading ? (
-          <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
+          <LoadingSpinner>
             <FiRefreshCw className="spinner" />
-            <div>Loading files...</div>
-          </div>
+            Loading directory...
+          </LoadingSpinner>
         ) : filteredFiles.length === 0 ? (
           <EmptyState>
             <FiFolder className="icon" />
@@ -411,15 +628,9 @@ const FileManager = ({ client, socket }) => {
         ) : viewMode === 'grid' ? (
           <FileGrid>
             {filteredFiles.map((file, index) => (
-              <FileItem key={index} onClick={() => {
-                if (file.isDirectory) {
-                  navigateToPath(file.path);
-                } else {
-                  handleFileDownload(file.name);
-                }
-              }}>
-                <FileIcon>
-                  {file.isDirectory ? <FiFolder /> : <FiFile />}
+              <FileItem key={index} onClick={() => handleFileClick(file)}>
+                <FileIcon color={getFileIconColor(file)}>
+                  {getFileIcon(file)}
                 </FileIcon>
                 <FileName>{file.name}</FileName>
                 <FileSize>{file.size}</FileSize>
@@ -429,9 +640,9 @@ const FileManager = ({ client, socket }) => {
         ) : (
           <FileList>
             {filteredFiles.map((file, index) => (
-              <FileRow key={index}>
-                <FileRowIcon>
-                  {file.isDirectory ? <FiFolder /> : <FiFile />}
+              <FileRow key={index} onClick={() => handleFileClick(file)}>
+                <FileRowIcon color={getFileIconColor(file)}>
+                  {getFileIcon(file)}
                 </FileRowIcon>
                 <FileRowInfo>
                   <FileRowName>{file.name}</FileRowName>
@@ -441,10 +652,19 @@ const FileManager = ({ client, socket }) => {
                   </FileRowDetails>
                 </FileRowInfo>
                 <FileRowActions>
-                  <ActionButton onClick={() => handleFileDownload(file.name)}>
-                    <FiDownload />
-                  </ActionButton>
-                  <ActionButton>
+                  {!file.isDirectory && (
+                    <ActionButton onClick={(e) => {
+                      e.stopPropagation();
+                      handleFileDownload(file.name);
+                    }}>
+                      <FiDownload />
+                    </ActionButton>
+                  )}
+                  <ActionButton onClick={(e) => {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(file.path);
+                    toast.success('Path copied to clipboard');
+                  }}>
                     <FiCopy />
                   </ActionButton>
                 </FileRowActions>

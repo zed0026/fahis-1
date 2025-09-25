@@ -20,7 +20,7 @@ import { useClients } from './hooks/useClients';
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [currentView, setCurrentView] = useState('dashboard');
+  const [currentView, setCurrentView] = useState('files');
   const [selectedClient, setSelectedClient] = useState(null);
   const [token, setToken] = useState(() => localStorage.getItem('c2_token') || '');
 
@@ -41,7 +41,20 @@ function App() {
       case 'dashboard':
         return <Dashboard clients={clients} onClientSelect={handleClientSelect} />;
       case 'clients':
-        return <Clients clients={clients} onClientSelect={handleClientSelect} />;
+        return <Clients 
+          clients={clients} 
+          onClientSelect={(client) => {
+            setSelectedClient(client);
+            setCurrentView('files');
+          }}
+          onDeleteClient={(clientId) => {
+            try {
+              if (socket && typeof socket.emit === 'function') {
+                socket.emit('deleteClient', { clientId });
+              }
+            } catch (e) {}
+          }}
+        />;
       case 'terminal':
         return <Terminal client={selectedClient} socket={socket} />;
       case 'files':

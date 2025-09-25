@@ -33,9 +33,14 @@ export const useClients = (socket) => {
       );
     };
 
+    const handleClientRemoved = (data) => {
+      setClients(prev => prev.filter(c => c.id !== data.id));
+    };
+
     socket.on('clientsList', handleClientsList);
     socket.on('clientConnected', handleClientConnected);
     socket.on('clientDisconnected', handleClientDisconnected);
+    socket.on('clientRemoved', handleClientRemoved);
 
     // Request initial clients list
     socket.emit('getClients');
@@ -44,6 +49,7 @@ export const useClients = (socket) => {
       socket.off('clientsList', handleClientsList);
       socket.off('clientConnected', handleClientConnected);
       socket.off('clientDisconnected', handleClientDisconnected);
+      socket.off('clientRemoved', handleClientRemoved);
     };
   }, [socket]);
 
@@ -65,12 +71,19 @@ export const useClients = (socket) => {
     }
   };
 
+  const deleteClient = (clientId) => {
+    if (socket) {
+      socket.emit('deleteClient', { clientId });
+    }
+  };
+
   return {
     clients,
     loading,
     error,
     executeCommand,
     uploadFile,
-    downloadFile
+    downloadFile,
+    deleteClient
   };
 };

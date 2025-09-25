@@ -240,7 +240,7 @@ const EmptyState = styled.div`
   }
 `;
 
-const Clients = ({ clients, onClientSelect }) => {
+const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
   const [refreshing, setRefreshing] = useState(false);
 
   const handleRefresh = () => {
@@ -340,9 +340,11 @@ const Clients = ({ clients, onClientSelect }) => {
                   <FiTerminal />
                   Connect
                 </ActionButton>
-                <ActionButton>
-                  <FiMoreVertical />
-                </ActionButton>
+                {!client.active && (
+                  <ActionButton onClick={() => onDeleteClient && onDeleteClient(client.id)}>
+                    <FiMoreVertical /> Delete
+                  </ActionButton>
+                )}
               </ClientActions>
             </ClientHeader>
 

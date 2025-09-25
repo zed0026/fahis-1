@@ -373,6 +373,21 @@ io.on('connection', (socket) => {
   
   socket.emit('clientsList', clientsList);
   
+  // Provide clients list on demand
+  socket.on('getClients', () => {
+    const list = Array.from(clients.values()).map(client => ({
+      id: client.id,
+      hostname: client.hostname,
+      username: client.username,
+      macAddress: client.macAddress,
+      ip: client.ip,
+      connectedAt: client.connectedAt,
+      lastSeen: client.lastSeen,
+      active: client.active
+    }));
+    socket.emit('clientsList', list);
+  });
+  
   // Handle command execution
   socket.on('executeCommand', (data) => {
     const { clientId, command } = data;
@@ -468,6 +483,24 @@ io.on('connection', (socket) => {
   // Get command history
   socket.on('getCommandHistory', () => {
     socket.emit('commandHistory', commandHistory);
+  });
+  
+  // Delete a disconnected client from memory
+  socket.on('deleteClient', (data) => {
+    try {
+      const clientId = typeof data === 'string' ? data : (data && data.clientId);
+      if (!clientId) return socket.emit('clientDeleteError', { error: 'clientId required' });
+      const client = clients.get(clientId);
+      if (!client) return socket.emit('clientDeleteError', { error: 'Client not found' });
+      if (client.active) return socket.emit('clientDeleteError', { error: 'Cannot delete active client' });
+      // Clean up maps
+      clients.delete(clientId);
+      clientSessions.delete(clientId);
+      // Notify all GUI clients
+      io.emit('clientRemoved', { id: clientId });
+    } catch (e) {
+      socket.emit('clientDeleteError', { error: e.message || 'Delete failed' });
+    }
   });
   
   socket.on('disconnect', () => {
