@@ -386,16 +386,33 @@ const FileManager = ({ client, socket }) => {
     if (!client || !socket) return;
     
     setLoading(true);
-    commandResponseRef.current = (response) => {
-      parseDirectoryResponse(response, path);
-      setLoading(false);
+    // Step 1: cd into the path (if provided)
+    const targetPath = path || currentPath;
+    const sendList = () => {
+      commandResponseRef.current = (response) => {
+        parseDirectoryResponse(response, targetPath);
+        setLoading(false);
+      };
+      const listCmd = targetPath ? `ls "${targetPath}"` : 'ls';
+      socket.emit('executeCommand', { clientId: client.id, command: listCmd });
     };
-    
-    const command = path ? `ls "${path}"` : 'ls';
-    socket.emit('executeCommand', {
-      clientId: client.id,
-      command: command
-    });
+    if (targetPath) {
+      // Run cd first; ignore its output, then list
+      const cdCmd = `cd ${targetPath}`;
+      const cdHandler = () => {
+        socket.off('commandResponse', cdHandler);
+        sendList();
+      };
+      socket.on('commandResponse', cdHandler);
+      socket.emit('executeCommand', { clientId: client.id, command: cdCmd });
+      // Safety timeout fallback to ensure we still list
+      setTimeout(() => {
+        try { socket.off('commandResponse', cdHandler); } catch (e) {}
+        sendList();
+      }, 1200);
+    } else {
+      sendList();
+    }
   };
 
   const parseDirectoryResponse = (response, targetPath = '') => {

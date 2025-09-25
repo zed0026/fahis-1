@@ -20,7 +20,7 @@ import { useClients } from './hooks/useClients';
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [currentView, setCurrentView] = useState('files');
+  const [currentView, setCurrentView] = useState('dashboard');
   const [selectedClient, setSelectedClient] = useState(null);
   const [token, setToken] = useState(() => localStorage.getItem('c2_token') || '');
 
