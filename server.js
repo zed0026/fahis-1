@@ -14,7 +14,7 @@ const bcrypt = require('bcryptjs');
 
 const app = express();
 const server = http.createServer(app);
-const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000,http://localhost:5000")
+const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000")
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
@@ -369,14 +369,8 @@ app.post('/api/login', async (req, res) => {
 
 // Protect API routes after this middleware
 app.use((req, res, next) => {
-  if (req.path.startsWith('/api/')) {
-    // Public API endpoints (read-only) allowed without auth
-    if (req.method === 'GET' && (req.path === '/api/clients' || req.path === '/api/settings')) {
-      return next();
-    }
-    if (req.path !== '/api/login') {
-      return requireAuth(req, res, next);
-    }
+  if (req.path.startsWith('/api/') && req.path !== '/api/login') {
+    return requireAuth(req, res, next);
   }
   return next();
 });
@@ -439,7 +433,7 @@ io.on('connection', (socket) => {
           content: command
         };
         
-        client.socket.write(JSON.stringify(commandData) + '\n');
+        client.socket.write(JSON.stringify(commandData));
         
         // Store command in history
         const session = clientSessions.get(clientId) || [];
@@ -485,7 +479,7 @@ io.on('connection', (socket) => {
           content: `upload ${filename}`
         };
         
-        client.socket.write(JSON.stringify(commandData) + '\n');
+        client.socket.write(JSON.stringify(commandData));
         socket.emit('uploadInitiated', { clientId, filename });
       } catch (error) {
         socket.emit('uploadError', { error: error.message });
@@ -505,7 +499,7 @@ io.on('connection', (socket) => {
           content: `download ${filename}`
         };
         
-        client.socket.write(JSON.stringify(commandData) + '\n');
+        client.socket.write(JSON.stringify(commandData));
         socket.emit('downloadInitiated', { clientId, filename });
       } catch (error) {
         socket.emit('downloadError', { error: error.message });
