@@ -24,7 +24,7 @@ function App() {
   const [selectedClient, setSelectedClient] = useState(null);
   const [token, setToken] = useState(() => localStorage.getItem('c2_token') || '');
 
-  const socket = useSocket();
+  const socket = useSocket(token);
   const { clients, loading, error } = useClients(socket);
 
   const toggleSidebar = () => {
