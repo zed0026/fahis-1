@@ -386,13 +386,19 @@ io.use((socket, next) => {
   if (!token && headers && typeof headers.authorization === 'string' && headers.authorization.startsWith('Bearer ')) {
     token = headers.authorization.slice(7);
   }
-  if (!token) return next(new Error('Unauthorized'));
+  if (!token) {
+    // Allow anonymous GUI sockets; restrict-sensitive actions elsewhere
+    socket.user = { sub: 'anonymous' };
+    return next();
+  }
   try {
     const payload = jwt.verify(token, JWT_SECRET);
     socket.user = payload;
     return next();
   } catch (e) {
-    return next(new Error('Unauthorized'));
+    // Fall back to anonymous instead of rejecting connection
+    socket.user = { sub: 'anonymous' };
+    return next();
   }
 });
 
