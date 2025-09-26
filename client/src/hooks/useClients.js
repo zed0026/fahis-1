@@ -64,11 +64,29 @@ export const useClients = (socket) => {
     // Request initial clients list
     socket.emit('getClients');
 
+    // Lightweight polling fallback in case socket events are missed by the UI
+    const token = localStorage.getItem('c2_token') || '';
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch('/api/clients', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        });
+        if (res.ok) {
+          const list = await res.json();
+          if (Array.isArray(list)) {
+            setClients(list);
+            setLoading(false);
+          }
+        }
+      } catch (e) {}
+    }, 5000);
+
     return () => {
       socket.off('clientsList', handleClientsList);
       socket.off('clientConnected', handleClientConnected);
       socket.off('clientDisconnected', handleClientDisconnected);
       socket.off('clientRemoved', handleClientRemoved);
+      clearInterval(poll);
     };
   }, [socket]);
 
