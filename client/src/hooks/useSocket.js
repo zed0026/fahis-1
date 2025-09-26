@@ -16,7 +16,13 @@ export const useSocket = (token) => {
 
     const origin = window.location.origin || 'http://localhost:5000';
     const newSocket = io(origin, {
-      auth: { token }
+      auth: { token },
+      withCredentials: true,
+      transports: ['polling'], // avoid WS issues on some hosts/proxies
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      timeout: 20000
     });
 
     newSocket.on('connect_error', (error) => {
