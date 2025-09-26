@@ -8,6 +8,25 @@ export const useClients = (socket) => {
   useEffect(() => {
     if (!socket) return;
 
+    // Initial HTTP fallback fetch to ensure dashboard shows any already-registered TCP clients
+    (async () => {
+      try {
+        const token = localStorage.getItem('c2_token') || '';
+        const res = await fetch('/api/clients', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        });
+        if (res.ok) {
+          const list = await res.json();
+          if (Array.isArray(list)) {
+            setClients(list);
+            setLoading(false);
+          }
+        }
+      } catch (e) {
+        // ignore; socket events will populate
+      }
+    })();
+
     const handleClientsList = (clientsList) => {
       setClients(clientsList);
       setLoading(false);
