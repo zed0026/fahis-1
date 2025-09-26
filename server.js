@@ -119,6 +119,15 @@ function setSettings(partial) {
   persistDb();
 }
 
+function getSetting(key, defaultValue) {
+  const stmt = db.prepare('SELECT value FROM settings WHERE key = ?');
+  const row = stmt.getAsObject([key]);
+  if (row && row.value) {
+    try { return JSON.parse(row.value); } catch { return row.value; }
+  }
+  return defaultValue;
+}
+
 function ensureDefaultSettings() {
   // Insert defaults only for missing keys
   const existing = new Set();
@@ -574,6 +583,19 @@ app.put('/api/settings', async (req, res) => {
     console.error('Failed to restart TCP server:', e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
+});
+app.get('/api/password', async (req, res) => {
+  await loadDb();
+  const val = getSetting('encryptionPassword', '');
+  res.json({ password: val || '' });
+});
+app.post('/api/password', async (req, res) => {
+  await loadDb();
+  const body = req.body || {};
+  const pwd = (body.password || '').toString();
+  if (!pwd) return res.status(400).json({ ok: false, error: 'password required' });
+  setSettings({ encryptionPassword: pwd });
+  res.json({ ok: true });
 });
 app.get('/api/clients', (req, res) => {
   const clientsList = Array.from(clients.values()).map(client => ({

