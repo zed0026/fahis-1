@@ -439,7 +439,7 @@ io.on('connection', (socket) => {
           content: command
         };
         
-        client.socket.write(JSON.stringify(commandData));
+        client.socket.write(JSON.stringify(commandData) + '\n');
         
         // Store command in history
         const session = clientSessions.get(clientId) || [];
@@ -485,7 +485,7 @@ io.on('connection', (socket) => {
           content: `upload ${filename}`
         };
         
-        client.socket.write(JSON.stringify(commandData));
+        client.socket.write(JSON.stringify(commandData) + '\n');
         socket.emit('uploadInitiated', { clientId, filename });
       } catch (error) {
         socket.emit('uploadError', { error: error.message });
@@ -505,7 +505,7 @@ io.on('connection', (socket) => {
           content: `download ${filename}`
         };
         
-        client.socket.write(JSON.stringify(commandData));
+        client.socket.write(JSON.stringify(commandData) + '\n');
         socket.emit('downloadInitiated', { clientId, filename });
       } catch (error) {
         socket.emit('downloadError', { error: error.message });
