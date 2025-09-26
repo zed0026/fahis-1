@@ -21,8 +21,9 @@ const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000")
 
 const io = socketIo(server, {
   cors: {
-    origin: allowedOrigins.length > 1 ? allowedOrigins : allowedOrigins[0],
-    methods: ["GET", "POST"]
+    origin: allowedOrigins.length ? allowedOrigins : '*',
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
@@ -377,7 +378,14 @@ app.use((req, res, next) => {
 
 // Socket authentication
 io.use((socket, next) => {
-  const token = socket.handshake && socket.handshake.auth && socket.handshake.auth.token;
+  const auth = socket.handshake && socket.handshake.auth;
+  const query = socket.handshake && socket.handshake.query;
+  const headers = socket.handshake && socket.handshake.headers;
+  let token = auth && auth.token;
+  if (!token && query && typeof query.token === 'string') token = query.token;
+  if (!token && headers && typeof headers.authorization === 'string' && headers.authorization.startsWith('Bearer ')) {
+    token = headers.authorization.slice(7);
+  }
   if (!token) return next(new Error('Unauthorized'));
   try {
     const payload = jwt.verify(token, JWT_SECRET);
