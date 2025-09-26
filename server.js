@@ -177,7 +177,7 @@ function createTcpServer() {
           };
           
           // Process the message
-      if (message.hostname) {
+          if (message.hostname) {
         // Initial client info
         const clientInfo = {
           id: clientId,
@@ -205,19 +205,6 @@ function createTcpServer() {
           ip: clientInfo.ip,
           connectedAt: clientInfo.connectedAt
         });
-
-        // Also broadcast refreshed clients list to ensure dashboard reflects the connection
-        const list = Array.from(clients.values()).map(c => ({
-          id: c.id,
-          hostname: c.hostname,
-          username: c.username,
-          macAddress: c.macAddress,
-          ip: c.ip,
-          connectedAt: c.connectedAt,
-          lastSeen: c.lastSeen,
-          active: c.active
-        }));
-        io.emit('clientsList', list);
       } else if (message.type === 'response') {
         // Command response
         const client = clients.get(clientId);
