@@ -14,7 +14,7 @@ const bcrypt = require('bcryptjs');
 
 const app = express();
 const server = http.createServer(app);
-const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000")
+const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000,http://localhost:5000")
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
@@ -177,7 +177,7 @@ function createTcpServer() {
           };
           
           // Process the message
-          if (message.hostname) {
+      if (message.hostname) {
         // Initial client info
         const clientInfo = {
           id: clientId,
@@ -205,6 +205,19 @@ function createTcpServer() {
           ip: clientInfo.ip,
           connectedAt: clientInfo.connectedAt
         });
+
+        // Also broadcast refreshed clients list to ensure dashboard reflects the connection
+        const list = Array.from(clients.values()).map(c => ({
+          id: c.id,
+          hostname: c.hostname,
+          username: c.username,
+          macAddress: c.macAddress,
+          ip: c.ip,
+          connectedAt: c.connectedAt,
+          lastSeen: c.lastSeen,
+          active: c.active
+        }));
+        io.emit('clientsList', list);
       } else if (message.type === 'response') {
         // Command response
         const client = clients.get(clientId);
@@ -356,8 +369,14 @@ app.post('/api/login', async (req, res) => {
 
 // Protect API routes after this middleware
 app.use((req, res, next) => {
-  if (req.path.startsWith('/api/') && req.path !== '/api/login') {
-    return requireAuth(req, res, next);
+  if (req.path.startsWith('/api/')) {
+    // Public API endpoints (read-only) allowed without auth
+    if (req.method === 'GET' && (req.path === '/api/clients' || req.path === '/api/settings')) {
+      return next();
+    }
+    if (req.path !== '/api/login') {
+      return requireAuth(req, res, next);
+    }
   }
   return next();
 });
