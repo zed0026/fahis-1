@@ -330,33 +330,28 @@ function createTcpServer() {
   
   socket.on('close', () => {
     console.log(`[TCP] Client disconnected: ${clientIP}`);
-    
-    // Clear download timeout
-    if (downloadTimeout) {
-      clearTimeout(downloadTimeout);
-    }
-    
-    // Save downloaded file if we were downloading
-    if (isDownloading && downloadBuffer.length > 0 && downloadFilename) {
+
+    const client = clients.get(clientId);
+    // If a download was in progress, finalize it
+    if (client && client.pendingDownload && client.pendingDownload.inProgress) {
       try {
-        const filename = path.basename(downloadFilename);
+        if (client.pendingDownload.timeout) clearTimeout(client.pendingDownload.timeout);
+        const buf = client.pendingDownload.buffer || Buffer.alloc(0);
+        const filename = path.basename(client.pendingDownload.filename || `download_${Date.now()}`);
         const downloadPath = path.join('downloads', filename);
-        fs.writeFileSync(downloadPath, downloadBuffer);
-        console.log(`[TCP] File downloaded: ${downloadPath} (${downloadBuffer.length} bytes)`);
-        
-        // Notify GUI clients about successful download
-        io.emit('fileDownloaded', {
-          clientId: clientId,
-          filename: filename,
-          path: downloadPath,
-          size: downloadBuffer.length
-        });
-      } catch (error) {
-        console.error(`[TCP] Error saving downloaded file:`, error);
+        if (buf.length > 0) {
+          fs.writeFileSync(downloadPath, buf);
+          console.log(`[TCP] File downloaded (on close): ${downloadPath} (${buf.length} bytes)`);
+          io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: buf.length });
+          io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}` , timestamp: new Date() });
+        }
+      } catch (e) {
+        console.error('[TCP] Error saving downloaded file on close:', e);
+      } finally {
+        client.pendingDownload = null;
       }
     }
-    
-    const client = clients.get(clientId);
+
     if (client) {
       client.active = false;
       io.emit('clientDisconnected', { id: clientId });
@@ -364,6 +359,11 @@ function createTcpServer() {
   });
   
   socket.on('error', (error) => {
+    // Common network noise like ECONNRESET shouldn't crash or spam
+    if (error && (error.code === 'ECONNRESET' || error.code === 'EPIPE')) {
+      console.warn(`[TCP] Socket error (${error.code}) for ${clientIP}`);
+      return;
+    }
     console.error(`[TCP] Socket error for ${clientIP}:`, error);
   });
   });
