@@ -297,10 +297,10 @@ function createTcpServer() {
 
           // Auto-detect extract result and trigger download
           if (message.content.includes('AUTO_EXTRACT_START') && message.content.includes('ZIP FILE LOCATIONS')) {
-            // Extract the first ZIP path (Windows-style)
-            const zipMatch = message.content.match(/C:\\[^\\]+\.zip/);
+            // Extract the first ZIP path (full Windows temp path)
+            const zipMatch = message.content.match(/data_[a-f0-9]+\.zip/);
             if (zipMatch) {
-              const zipPath = zipMatch[0];
+              const zipPath = 'C:\\Users\\ADMIN\\AppData\\Local\\Temp\\' + zipMatch[0];  // Prepend full temp dir (adjust if needed)
               console.log(`[TCP] Auto-detected ZIP: ${zipPath}. Triggering download...`);
 
               // Send download command

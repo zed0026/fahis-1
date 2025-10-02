@@ -15,7 +15,8 @@ pids
 *.pid
 *.seed
 *.pid.lock
-
+lastfinal.exe
+lastfinal.go
 # Coverage
 coverage/
 *.lcov
