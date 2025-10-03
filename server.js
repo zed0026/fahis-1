@@ -162,7 +162,7 @@ function createEmailTransporter() {
     return null;
   }
 
-  return nodemailer.createTransporter({
+  return nodemailer.createTransport({
     host: settings.emailHost,
     port: settings.emailPort,
     secure: settings.emailSecure,
