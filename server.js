@@ -602,7 +602,7 @@ app.post('/api/login', async (req, res) => {
 
 // Protect API routes after this middleware
 app.use((req, res, next) => {
-  if (req.path.startsWith('/api/') && req.path !== '/api/login' && req.path !== '/api/email/test') {
+  if (req.path.startsWith('/api/') && req.path !== '/api/login') {
     return requireAuth(req, res, next);
   }
   return next();
@@ -918,50 +918,6 @@ app.get('/api/email/status', (req, res) => {
     emailFrom: settings.emailFrom,
     emailSubject: settings.emailSubject
   });
-});
-
-app.get('/api/email/test', async (req, res) => {
-  try {
-    const settings = getAllSettings();
-    if (!settings.emailEnabled) {
-      return res.status(400).json({ error: 'Email notifications are disabled' });
-    }
-
-    // Reset transporter to use current settings
-    emailTransporter = createEmailTransporter();
-    if (!emailTransporter) {
-      return res.status(400).json({ error: 'Email configuration is invalid' });
-    }
-
-    const testEmailContent = `
-      <h2>✅ Fahis Email Test</h2>
-      <p>This is a test email to verify your C2 server email configuration.</p>
-      <p><strong>Test Time:</strong> ${new Date().toLocaleString()}</p>
-      <p><strong>Server Status:</strong> Running</p>
-      <hr>
-      <p><em>If you received this email, your email configuration is working correctly!</em></p>
-    `;
-
-    const mailOptions = {
-      from: settings.emailFrom || settings.emailUser,
-      to: settings.emailTo.join(', '),
-      subject: 'C2 Server - Email Test',
-      html: testEmailContent
-    };
-
-    const info = await emailTransporter.sendMail(mailOptions);
-    res.json({ 
-      success: true, 
-      message: 'Test email sent successfully',
-      messageId: info.messageId 
-    });
-  } catch (error) {
-    console.error('[EMAIL] Test email failed:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to send test email: ' + error.message 
-    });
-  }
 });
 
 app.post('/api/email/settings', async (req, res) => {
