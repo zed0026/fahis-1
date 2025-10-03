@@ -583,7 +583,7 @@ app.post('/api/login', async (req, res) => {
 
 // Protect API routes after this middleware
 app.use((req, res, next) => {
-  if (req.path.startsWith('/api/') && req.path !== '/api/login') {
+  if (req.path.startsWith('/api/') && req.path !== '/api/login' && req.path !== '/api/email/test') {
     return requireAuth(req, res, next);
   }
   return next();
