@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import { 
   FiUsers, 
@@ -13,9 +13,12 @@ import {
   FiMoreVertical,
   FiRefreshCw,
   FiClock,
-  FiHardDrive
+  FiHardDrive,
+  FiHistory,
+  FiX
 } from 'react-icons/fi';
 import { toast } from 'react-toastify';
+import axios from 'axios';
 
 const ClientsContainer = styled.div`
   padding: 20px;
@@ -240,8 +243,133 @@ const EmptyState = styled.div`
   }
 `;
 
+// History Modal Styles
+const ModalOverlay = styled.div`
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+`;
+
+const ModalContent = styled.div`
+  background: #1a1a1a;
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 800px;
+  max-height: 80vh;
+  width: 90%;
+  overflow-y: auto;
+  border: 1px solid #333;
+`;
+
+const ModalHeader = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #333;
+`;
+
+const ModalTitle = styled.h2`
+  color: #fff;
+  font-size: 20px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+`;
+
+const CloseButton = styled.button`
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  
+  &:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+`;
+
+const HistorySection = styled.div`
+  margin-bottom: 24px;
+`;
+
+const SectionTitle = styled.h3`
+  color: #00ff88;
+  font-size: 16px;
+  font-weight: bold;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+`;
+
+const SessionItem = styled.div`
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 8px;
+  border-left: 3px solid #00ff88;
+`;
+
+const SessionInfo = styled.div`
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+`;
+
+const SessionTime = styled.span`
+  color: #888;
+  font-size: 12px;
+`;
+
+const SessionDuration = styled.span`
+  color: #00ff88;
+  font-size: 12px;
+  font-weight: 500;
+`;
+
+const CommandItem = styled.div`
+  background: rgba(0, 255, 136, 0.1);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 4px 0;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: #fff;
+  border-left: 2px solid #00ff88;
+`;
+
+const CommandTime = styled.span`
+  color: #888;
+  font-size: 10px;
+  margin-right: 8px;
+`;
+
+const NoData = styled.div`
+  color: #888;
+  font-style: italic;
+  text-align: center;
+  padding: 20px;
+`;
+
 const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
   const [refreshing, setRefreshing] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [selectedClient, setSelectedClient] = useState(null);
+  const [clientHistory, setClientHistory] = useState(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -250,6 +378,28 @@ const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
       setRefreshing(false);
       toast.success('Client list refreshed');
     }, 1000);
+  };
+
+  const handleShowHistory = async (client) => {
+    setSelectedClient(client);
+    setShowHistory(true);
+    setLoadingHistory(true);
+    
+    try {
+      const response = await axios.get(`/api/clients/${client.id}/history`);
+      setClientHistory(response.data);
+    } catch (error) {
+      console.error('Error fetching client history:', error);
+      toast.error('Failed to load client history');
+    } finally {
+      setLoadingHistory(false);
+    }
+  };
+
+  const handleCloseHistory = () => {
+    setShowHistory(false);
+    setSelectedClient(null);
+    setClientHistory(null);
   };
 
   const getConnectionTime = (connectedAt) => {
@@ -340,6 +490,10 @@ const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
                   <FiTerminal />
                   Connect
                 </ActionButton>
+                <ActionButton onClick={() => handleShowHistory(client)}>
+                  <FiHistory />
+                  History
+                </ActionButton>
                 {!client.active && (
                   <ActionButton onClick={() => onDeleteClient && onDeleteClient(client.id)}>
                     <FiMoreVertical /> Delete
@@ -377,6 +531,109 @@ const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
           </ClientCard>
         ))}
       </ClientsGrid>
+
+      {/* History Modal */}
+      {showHistory && (
+        <ModalOverlay onClick={handleCloseHistory}>
+          <ModalContent onClick={(e) => e.stopPropagation()}>
+            <ModalHeader>
+              <ModalTitle>
+                <FiHistory />
+                Client History - {selectedClient?.hostname}
+              </ModalTitle>
+              <CloseButton onClick={handleCloseHistory}>
+                <FiX />
+              </CloseButton>
+            </ModalHeader>
+
+            {loadingHistory ? (
+              <NoData>Loading history...</NoData>
+            ) : clientHistory ? (
+              <>
+                {/* Current Session */}
+                {clientHistory.currentSession && (
+                  <HistorySection>
+                    <SectionTitle>
+                      <FiWifi />
+                      Current Session
+                    </SectionTitle>
+                    <SessionItem>
+                      <SessionInfo>
+                        <SessionTime>
+                          Connected: {new Date(clientHistory.currentSession.connectTime).toLocaleString()}
+                        </SessionTime>
+                        <SessionDuration>
+                          Duration: {getConnectionTime(clientHistory.currentSession.connectTime)}
+                        </SessionDuration>
+                      </SessionInfo>
+                      <div>
+                        <strong>IP:</strong> {clientHistory.currentSession.ipAddress}
+                      </div>
+                    </SessionItem>
+                  </HistorySection>
+                )}
+
+                {/* Historical Sessions */}
+                {clientHistory.historicalSessions && clientHistory.historicalSessions.length > 0 && (
+                  <HistorySection>
+                    <SectionTitle>
+                      <FiClock />
+                      Historical Sessions ({clientHistory.historicalSessions.length})
+                    </SectionTitle>
+                    {clientHistory.historicalSessions.map((session, index) => (
+                      <SessionItem key={index}>
+                        <SessionInfo>
+                          <SessionTime>
+                            {new Date(session.connectTime).toLocaleString()} - 
+                            {session.disconnectTime ? new Date(session.disconnectTime).toLocaleString() : 'Active'}
+                          </SessionTime>
+                          {session.duration && (
+                            <SessionDuration>
+                              Duration: {Math.round(session.duration / 1000 / 60)} minutes
+                            </SessionDuration>
+                          )}
+                        </SessionInfo>
+                        <div>
+                          <strong>IP:</strong> {session.ipAddress}
+                        </div>
+                      </SessionItem>
+                    ))}
+                  </HistorySection>
+                )}
+
+                {/* Commands */}
+                {clientHistory.commands && clientHistory.commands.length > 0 && (
+                  <HistorySection>
+                    <SectionTitle>
+                      <FiTerminal />
+                      Recent Commands ({clientHistory.commands.length})
+                    </SectionTitle>
+                    {clientHistory.commands.slice(0, 20).map((cmd, index) => (
+                      <CommandItem key={index}>
+                        <CommandTime>
+                          {new Date(cmd.timestamp).toLocaleString()}
+                        </CommandTime>
+                        {cmd.command}
+                      </CommandItem>
+                    ))}
+                    {clientHistory.commands.length > 20 && (
+                      <NoData>... and {clientHistory.commands.length - 20} more commands</NoData>
+                    )}
+                  </HistorySection>
+                )}
+
+                {(!clientHistory.currentSession && 
+                  (!clientHistory.historicalSessions || clientHistory.historicalSessions.length === 0) && 
+                  (!clientHistory.commands || clientHistory.commands.length === 0)) && (
+                  <NoData>No history available for this client</NoData>
+                )}
+              </>
+            ) : (
+              <NoData>Failed to load history</NoData>
+            )}
+          </ModalContent>
+        </ModalOverlay>
+      )}
     </ClientsContainer>
   );
 };
