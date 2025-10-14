@@ -393,6 +393,43 @@ async function loadDb() {
     }
     // Ensure tables exist when upgrading
     db.run(`CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, passwordHash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin');`);
+    
+    // Create client history tables
+    db.run(`CREATE TABLE IF NOT EXISTS clients (
+      id TEXT PRIMARY KEY,
+      hostname TEXT NOT NULL,
+      username TEXT NOT NULL,
+      os TEXT NOT NULL,
+      ip TEXT NOT NULL,
+      macAddress TEXT,
+      firstSeen TEXT NOT NULL,
+      lastSeen TEXT NOT NULL,
+      totalConnections INTEGER DEFAULT 1,
+      status TEXT DEFAULT 'offline'
+    );`);
+    
+    db.run(`CREATE TABLE IF NOT EXISTS client_sessions (
+      sessionId TEXT PRIMARY KEY,
+      clientId TEXT NOT NULL,
+      connectTime TEXT NOT NULL,
+      disconnectTime TEXT,
+      ipAddress TEXT,
+      duration INTEGER,
+      FOREIGN KEY (clientId) REFERENCES clients(id)
+    );`);
+    
+    db.run(`CREATE TABLE IF NOT EXISTS client_commands (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      clientId TEXT NOT NULL,
+      sessionId TEXT,
+      command TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      response TEXT,
+      FOREIGN KEY (clientId) REFERENCES clients(id),
+      FOREIGN KEY (sessionId) REFERENCES client_sessions(sessionId)
+    );`);
+    
+    persistDb();
   }
 }
 
@@ -570,6 +607,201 @@ async function sendConnectionAlert(clientInfo) {
   ensureDefaultSettings();
 })();
 
+// ============================================================
+// CLIENT HISTORY DATABASE FUNCTIONS
+// ============================================================
+
+/**
+ * Save or update client in database
+ */
+function saveClientToDb(clientInfo) {
+  try {
+    const now = new Date().toISOString();
+    
+    // Check if client already exists
+    const existing = db.exec(`SELECT * FROM clients WHERE id = '${clientInfo.id}'`);
+    
+    if (existing.length > 0 && existing[0].values.length > 0) {
+      // Update existing client
+      db.run(`UPDATE clients SET 
+        lastSeen = '${now}',
+        totalConnections = totalConnections + 1,
+        status = 'online',
+        ip = '${clientInfo.ip || 'unknown'}',
+        hostname = '${clientInfo.hostname || 'unknown'}',
+        username = '${clientInfo.username || 'unknown'}',
+        os = '${clientInfo.os || 'unknown'}',
+        macAddress = '${clientInfo.macAddress || 'unknown'}'
+        WHERE id = '${clientInfo.id}'`);
+    } else {
+      // Insert new client
+      db.run(`INSERT INTO clients (id, hostname, username, os, ip, macAddress, firstSeen, lastSeen, totalConnections, status)
+        VALUES (
+          '${clientInfo.id}',
+          '${clientInfo.hostname || 'unknown'}',
+          '${clientInfo.username || 'unknown'}',
+          '${clientInfo.os || 'unknown'}',
+          '${clientInfo.ip || 'unknown'}',
+          '${clientInfo.macAddress || 'unknown'}',
+          '${now}',
+          '${now}',
+          1,
+          'online'
+        )`);
+    }
+    
+    persistDb();
+    console.log(`[DB] Client saved: ${clientInfo.id} (${clientInfo.hostname})`);
+  } catch (error) {
+    console.error('[DB] Error saving client:', error);
+  }
+}
+
+/**
+ * Create new session for client
+ */
+function createClientSession(clientId, sessionId, ipAddress) {
+  try {
+    const now = new Date().toISOString();
+    
+    db.run(`INSERT INTO client_sessions (sessionId, clientId, connectTime, ipAddress)
+      VALUES ('${sessionId}', '${clientId}', '${now}', '${ipAddress || 'unknown'}')`);
+    
+    persistDb();
+    console.log(`[DB] Session created: ${sessionId} for client ${clientId}`);
+  } catch (error) {
+    console.error('[DB] Error creating session:', error);
+  }
+}
+
+/**
+ * Close client session
+ */
+function closeClientSession(sessionId) {
+  try {
+    const now = new Date().toISOString();
+    
+    // Get session start time
+    const session = db.exec(`SELECT connectTime FROM client_sessions WHERE sessionId = '${sessionId}'`);
+    
+    if (session.length > 0 && session[0].values.length > 0) {
+      const connectTime = new Date(session[0].values[0][0]);
+      const disconnectTime = new Date(now);
+      const duration = Math.floor((disconnectTime - connectTime) / 1000); // Duration in seconds
+      
+      db.run(`UPDATE client_sessions SET 
+        disconnectTime = '${now}',
+        duration = ${duration}
+        WHERE sessionId = '${sessionId}'`);
+      
+      persistDb();
+      console.log(`[DB] Session closed: ${sessionId} (Duration: ${duration}s)`);
+    }
+  } catch (error) {
+    console.error('[DB] Error closing session:', error);
+  }
+}
+
+/**
+ * Mark client as offline
+ */
+function markClientOffline(clientId) {
+  try {
+    db.run(`UPDATE clients SET status = 'offline' WHERE id = '${clientId}'`);
+    persistDb();
+    console.log(`[DB] Client marked offline: ${clientId}`);
+  } catch (error) {
+    console.error('[DB] Error marking client offline:', error);
+  }
+}
+
+/**
+ * Log client command
+ */
+function logClientCommand(clientId, sessionId, command, response = null) {
+  try {
+    const now = new Date().toISOString();
+    const safeCommand = command.replace(/'/g, "''"); // Escape single quotes
+    const safeResponse = response ? response.substring(0, 1000).replace(/'/g, "''") : null; // Limit response size
+    
+    db.run(`INSERT INTO client_commands (clientId, sessionId, command, timestamp, response)
+      VALUES ('${clientId}', '${sessionId}', '${safeCommand}', '${now}', ${safeResponse ? `'${safeResponse}'` : 'NULL'})`);
+    
+    persistDb();
+  } catch (error) {
+    console.error('[DB] Error logging command:', error);
+  }
+}
+
+/**
+ * Get all clients from database
+ */
+function getAllClientsFromDb() {
+  try {
+    const result = db.exec(`SELECT * FROM clients ORDER BY lastSeen DESC`);
+    
+    if (result.length > 0 && result[0].values.length > 0) {
+      const columns = result[0].columns;
+      const values = result[0].values;
+      
+      return values.map(row => {
+        const client = {};
+        columns.forEach((col, index) => {
+          client[col] = row[index];
+        });
+        return client;
+      });
+    }
+    
+    return [];
+  } catch (error) {
+    console.error('[DB] Error getting clients:', error);
+    return [];
+  }
+}
+
+/**
+ * Get client history
+ */
+function getClientHistory(clientId) {
+  try {
+    const sessions = db.exec(`SELECT * FROM client_sessions WHERE clientId = '${clientId}' ORDER BY connectTime DESC LIMIT 50`);
+    const commands = db.exec(`SELECT * FROM client_commands WHERE clientId = '${clientId}' ORDER BY timestamp DESC LIMIT 100`);
+    
+    const result = {
+      sessions: [],
+      commands: []
+    };
+    
+    if (sessions.length > 0 && sessions[0].values.length > 0) {
+      const cols = sessions[0].columns;
+      result.sessions = sessions[0].values.map(row => {
+        const session = {};
+        cols.forEach((col, index) => {
+          session[col] = row[index];
+        });
+        return session;
+      });
+    }
+    
+    if (commands.length > 0 && commands[0].values.length > 0) {
+      const cols = commands[0].columns;
+      result.commands = commands[0].values.map(row => {
+        const command = {};
+        cols.forEach((col, index) => {
+          command[col] = row[index];
+        });
+        return command;
+      });
+    }
+    
+    return result;
+  } catch (error) {
+    console.error('[DB] Error getting client history:', error);
+    return { sessions: [], commands: [] };
+  }
+}
+
 // TCP Server for Go clients
 let tcpServer = null;
 
@@ -703,14 +935,20 @@ function createTcpServer() {
           hostname: message.hostname,
           macAddress: message.macAddress,
           username: message.username,
+          os: message.os || 'Unknown',
           socket: socket,
           connectedAt: new Date(),
           lastSeen: new Date(),
-          active: true
+          active: true,
+          sessionId: uuidv4()
         };
         
         clients.set(clientId, clientInfo);
         clientSessions.set(clientId, []);
+        
+        // Save to database
+        saveClientToDb(clientInfo);
+        createClientSession(clientId, clientInfo.sessionId, clientIP);
         
         console.log(`[TCP] Client registered: ${clientInfo.hostname} (${clientInfo.username})`);
         
@@ -857,6 +1095,12 @@ function createTcpServer() {
     console.log(`[TCP] Client disconnected: ${clientIP}`);
 
     const client = clients.get(clientId);
+    
+    // Update database
+    if (client) {
+      closeClientSession(client.sessionId);
+      markClientOffline(clientId);
+    }
     // If a download was in progress, finalize it
     if (client && client.pendingDownload && client.pendingDownload.inProgress) {
       try {
@@ -1196,6 +1440,11 @@ io.on('connection', (socket) => {
         });
         clientSessions.set(clientId, session);
         
+        // Log command to database
+        if (client.sessionId) {
+          logClientCommand(clientId, client.sessionId, command);
+        }
+        
         commandHistory.push({
           id: uuidv4(),
           clientId: clientId,
@@ -1334,25 +1583,63 @@ app.post('/api/password', async (req, res) => {
   setSettings({ encryptionPassword: pwd });
   res.json({ ok: true });
 });
-app.get('/api/clients', (req, res) => {
-  const clientsList = Array.from(clients.values()).map(client => ({
+app.get('/api/clients', async (req, res) => {
+  await loadDb();
+  
+  // Get currently connected clients
+  const activeClients = Array.from(clients.values()).map(client => ({
     id: client.id,
     hostname: client.hostname,
     username: client.username,
     macAddress: client.macAddress,
+    os: client.os,
     ip: client.ip,
     connectedAt: client.connectedAt,
     lastSeen: client.lastSeen,
-    active: client.active
+    active: client.active,
+    status: 'online'
   }));
   
-  res.json(clientsList);
+  // Get all clients from database
+  const dbClients = getAllClientsFromDb();
+  
+  // Merge active clients with database clients
+  const clientsMap = new Map();
+  
+  // Add database clients first
+  dbClients.forEach(dbClient => {
+    clientsMap.set(dbClient.id, {
+      ...dbClient,
+      connectedAt: dbClient.firstSeen,
+      status: dbClient.status || 'offline'
+    });
+  });
+  
+  // Override with active client data
+  activeClients.forEach(activeClient => {
+    clientsMap.set(activeClient.id, activeClient);
+  });
+  
+  const mergedClients = Array.from(clientsMap.values());
+  res.json(mergedClients);
 });
 
-app.get('/api/clients/:id/history', (req, res) => {
+app.get('/api/clients/:id/history', async (req, res) => {
+  await loadDb();
+  
   const clientId = req.params.id;
-  const session = clientSessions.get(clientId) || [];
-  res.json(session);
+  
+  // Get current session data
+  const currentSession = clientSessions.get(clientId) || [];
+  
+  // Get historical data from database
+  const history = getClientHistory(clientId);
+  
+  res.json({
+    currentSession: currentSession,
+    sessions: history.sessions,
+    commands: history.commands
+  });
 });
 
 app.post('/api/upload', upload.single('file'), (req, res) => {
