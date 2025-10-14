@@ -14,7 +14,7 @@ import {
   FiRefreshCw,
   FiClock,
   FiHardDrive,
-  FiHistory,
+  FiArchive,
   FiX
 } from 'react-icons/fi';
 import { toast } from 'react-toastify';
@@ -370,6 +370,9 @@ const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
   const [selectedClient, setSelectedClient] = useState(null);
   const [clientHistory, setClientHistory] = useState(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(false);
+  const [allClientsHistory, setAllClientsHistory] = useState([]);
+  const [loadingAllHistory, setLoadingAllHistory] = useState(false);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -400,6 +403,26 @@ const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
     setShowHistory(false);
     setSelectedClient(null);
     setClientHistory(null);
+  };
+
+  const handleShowAllHistory = async () => {
+    setShowAllHistory(true);
+    setLoadingAllHistory(true);
+    
+    try {
+      const response = await axios.get('/api/clients');
+      setAllClientsHistory(response.data);
+    } catch (error) {
+      console.error('Error fetching all clients history:', error);
+      toast.error('Failed to load clients history');
+    } finally {
+      setLoadingAllHistory(false);
+    }
+  };
+
+  const handleCloseAllHistory = () => {
+    setShowAllHistory(false);
+    setAllClientsHistory([]);
   };
 
   const getConnectionTime = (connectedAt) => {
@@ -449,10 +472,16 @@ const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
           <FiUsers />
           Connected Clients
         </Title>
-        <RefreshButton onClick={handleRefresh} disabled={refreshing}>
-          <FiRefreshCw className={refreshing ? 'spinner' : ''} />
-          Refresh
-        </RefreshButton>
+        <div style={{ display: 'flex', gap: '12px' }}>
+          <ActionButton onClick={handleShowAllHistory}>
+            <FiArchive />
+            View All History
+          </ActionButton>
+          <RefreshButton onClick={handleRefresh} disabled={refreshing}>
+            <FiRefreshCw className={refreshing ? 'spinner' : ''} />
+            Refresh
+          </RefreshButton>
+        </div>
       </Header>
 
       <StatsGrid>
@@ -491,7 +520,7 @@ const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
                   Connect
                 </ActionButton>
                 <ActionButton onClick={() => handleShowHistory(client)}>
-                  <FiHistory />
+                  <FiArchive />
                   History
                 </ActionButton>
                 {!client.active && (
@@ -538,7 +567,7 @@ const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
           <ModalContent onClick={(e) => e.stopPropagation()}>
             <ModalHeader>
               <ModalTitle>
-                <FiHistory />
+                <FiArchive />
                 Client History - {selectedClient?.hostname}
               </ModalTitle>
               <CloseButton onClick={handleCloseHistory}>
@@ -630,6 +659,67 @@ const Clients = ({ clients, onClientSelect, onDeleteClient }) => {
               </>
             ) : (
               <NoData>Failed to load history</NoData>
+            )}
+          </ModalContent>
+        </ModalOverlay>
+      )}
+
+      {/* All History Modal */}
+      {showAllHistory && (
+        <ModalOverlay onClick={handleCloseAllHistory}>
+          <ModalContent onClick={(e) => e.stopPropagation()}>
+            <ModalHeader>
+              <ModalTitle>
+                <FiArchive />
+                All Clients History
+              </ModalTitle>
+              <CloseButton onClick={handleCloseAllHistory}>
+                <FiX />
+              </CloseButton>
+            </ModalHeader>
+
+            {loadingAllHistory ? (
+              <NoData>Loading all clients history...</NoData>
+            ) : allClientsHistory && allClientsHistory.length > 0 ? (
+              <div>
+                {allClientsHistory.map((client) => (
+                  <HistorySection key={client.id}>
+                    <SectionTitle>
+                      <FiMonitor />
+                      {client.hostname} ({client.username})
+                    </SectionTitle>
+                    <SessionItem>
+                      <SessionInfo>
+                        <SessionTime>
+                          Last Seen: {new Date(client.lastSeen).toLocaleString()}
+                        </SessionTime>
+                        <SessionDuration>
+                          Total Connections: {client.totalConnections || 0}
+                        </SessionDuration>
+                      </SessionInfo>
+                      <div>
+                        <strong>IP:</strong> {client.ip} | 
+                        <strong> OS:</strong> {client.os} | 
+                        <strong> Status:</strong> {client.active ? 'Online' : 'Offline'}
+                      </div>
+                      <div style={{ marginTop: '8px' }}>
+                        <ActionButton 
+                          onClick={() => {
+                            handleCloseAllHistory();
+                            handleShowHistory(client);
+                          }}
+                          style={{ fontSize: '12px', padding: '4px 8px' }}
+                        >
+                          <FiArchive />
+                          View Detailed History
+                        </ActionButton>
+                      </div>
+                    </SessionItem>
+                  </HistorySection>
+                ))}
+              </div>
+            ) : (
+              <NoData>No client history found</NoData>
             )}
           </ModalContent>
         </ModalOverlay>
