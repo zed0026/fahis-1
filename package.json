@@ -12,7 +12,8 @@
     "build:go:v3": "go build -o V3.exe V3.go",
     "build:go:client-local": "go build -tags localtest -o lastfinalversion2_local.exe lastfinalversion2.go lastfinalversion2_localtest.go",
     "build:go:client-prod": "go build -o lastfinalversion2.exe lastfinalversion2.go",
-    "build:go:win-local": "npm run build:go:v3 && npm run build:go:client-local"
+    "build:go:win-local": "npm run build:go:v3 && npm run build:go:client-local",
+    "pm2:start": "pm2 start ecosystem.config.cjs"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",

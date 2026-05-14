@@ -1,4 +1,5 @@
-require('dotenv').config();
+// override: true — PM2 often sets TCP_PORT=80 in ecosystem; .env TCP_PORT=2026 must win for Go clients.
+require('dotenv').config({ override: true });
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
