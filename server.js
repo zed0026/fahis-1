@@ -17,7 +17,7 @@ const os = require('os');
 
 const app = express();
 const server = http.createServer(app);
-const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000")
+const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5000")
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
