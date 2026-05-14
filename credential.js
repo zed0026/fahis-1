@@ -50,6 +50,7 @@ const initSqlJs = require('sql.js');
     const upsert = db.prepare('INSERT OR REPLACE INTO users (username, passwordHash, role) VALUES (?, ?, COALESCE((SELECT role FROM users WHERE username = ?), "admin"))');
     upsert.run([username, passwordHash, username]);
     console.log(`Set credentials for ${username}`);
+    console.log('Tip: If the C2 server is already running, log in again — it reloads users from c2.sqlite on each login.');
   }
 
   // persist DB

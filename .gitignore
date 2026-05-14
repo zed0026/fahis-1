@@ -17,6 +17,12 @@ pids
 *.pid.lock
 lastfinal.exe
 lastfinal.go
+
+# Local practice / localtest Go client (-tags localtest, go build -o rat_local.exe …)
+rat_local.exe
+*_local.exe
+_rat*.exe
+
 # Coverage
 coverage/
 *.lcov

