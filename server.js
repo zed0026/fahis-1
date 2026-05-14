@@ -1258,8 +1258,8 @@ function resolveImplantTcpPort(rawTcpPort, rawHttpPort) {
   return tcpP;
 }
 
-function startTcpServer(host, port) {
-  const port = normalizeTcpListenPort(port);
+function startTcpServer(host, portRaw) {
+  const port = normalizeTcpListenPort(portRaw);
   return new Promise((resolve, reject) => {
     const srv = createTcpServer();
     // Attach error handler BEFORE listen to avoid race on immediate DNS errors
