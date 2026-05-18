@@ -54,10 +54,10 @@ function buildRemoteUploadPath(cwd, fileName) {
 function terminalUploadBarPercent(progress) {
   if (!progress) return 0;
   if (progress.phase === 'read' && progress.total > 0) {
-    return Math.min(28, Math.round((progress.loaded / progress.total) * 28));
+    return Math.min(24, Math.round((progress.loaded / progress.total) * 24));
   }
   if (progress.phase === 'send' && progress.total > 0) {
-    return 30 + Math.round((progress.sent / progress.total) * 70);
+    return 24 + Math.round((progress.sent / progress.total) * 76);
   }
   return 0;
 }
@@ -515,6 +515,8 @@ const Terminal = ({ client, socket }) => {
   const outputRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
+  const socketRef = useRef(socket);
+  socketRef.current = socket;
 
   const commandsData = {
     'Terminal panel': [
@@ -641,14 +643,16 @@ const Terminal = ({ client, socket }) => {
     }
   }, [output, client?.id, historyReady]);
 
-  // Sync remote cwd (pwd tracks implant process directory, same as cd/ls)
+  // Sync remote cwd once per selected client (avoid re-firing pwd on unrelated socket object churn).
   useEffect(() => {
-    if (!socket || !client) return;
+    if (!client) return;
     const t = setTimeout(() => {
-      socket.emit('executeCommand', { clientId: client.id, command: 'pwd' });
+      const s = socketRef.current;
+      if (!s || !s.connected) return;
+      s.emit('executeCommand', { clientId: client.id, command: 'pwd' });
     }, 350);
     return () => clearTimeout(t);
-  }, [socket, client?.id]);
+  }, [client?.id]);
 
   useEffect(() => {
     if (!socket || !client) return;

@@ -46,10 +46,10 @@ function waitForResponse(socket, clientId, predicate, timeoutMs = 25000) {
 function fmUploadBarPercent(progress) {
   if (!progress) return 0;
   if (progress.phase === 'read' && progress.total > 0) {
-    return Math.min(28, Math.round((progress.loaded / progress.total) * 28));
+    return Math.min(24, Math.round((progress.loaded / progress.total) * 24));
   }
   if (progress.phase === 'send' && progress.total > 0) {
-    return 30 + Math.round((progress.sent / progress.total) * 70);
+    return 24 + Math.round((progress.sent / progress.total) * 76);
   }
   return 0;
 }

