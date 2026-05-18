@@ -22,7 +22,9 @@ export const useSocket = (token) => {
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
-      timeout: 20000
+      timeout: 20000,
+      // Must match server maxHttpBufferSize so multi‑MiB base64 uploads are not rejected (~1 MiB default).
+      maxHttpBufferSize: 128 * 1024 * 1024
     });
 
     newSocket.on('connect_error', (error) => {

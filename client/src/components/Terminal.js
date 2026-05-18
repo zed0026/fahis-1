@@ -51,6 +51,17 @@ function buildRemoteUploadPath(cwd, fileName) {
   return `${base}\\${name}`;
 }
 
+function terminalUploadBarPercent(progress) {
+  if (!progress) return 0;
+  if (progress.phase === 'read' && progress.total > 0) {
+    return Math.min(28, Math.round((progress.loaded / progress.total) * 28));
+  }
+  if (progress.phase === 'send' && progress.total > 0) {
+    return 30 + Math.round((progress.sent / progress.total) * 70);
+  }
+  return 0;
+}
+
 const TerminalContainer = styled.div`
   background: #0a0a0a;
   border-radius: 12px;
@@ -236,6 +247,35 @@ const UploadButton = styled.button`
 
 const HiddenFileInput = styled.input`
   display: none;
+`;
+
+const UploadProgressRow = styled.div`
+  flex: 1 1 100%;
+  min-width: 220px;
+`;
+
+const UploadProgressMeta = styled.div`
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: #888;
+  font-family: 'Courier New', monospace;
+`;
+
+const UploadProgressTrack = styled.div`
+  height: 8px;
+  background: #2a2a2a;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid #333;
+`;
+
+const UploadProgressFill = styled.div`
+  height: 100%;
+  background: linear-gradient(90deg, #00ff88, #00aa66);
+  transition: width 0.15s ease-out;
 `;
 
 const CommandInput = styled.input`
@@ -470,6 +510,7 @@ const Terminal = ({ client, socket }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [remoteCwd, setRemoteCwd] = useState(null);
   const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [historyReady, setHistoryReady] = useState(false);
   const outputRef = useRef(null);
   const inputRef = useRef(null);
@@ -620,9 +661,11 @@ const Terminal = ({ client, socket }) => {
 
         if (/upload complete/i.test(text)) {
           setUploadBusy(false);
+          setUploadProgress(null);
           toast.success('File uploaded to client');
         } else if (/upload failed/i.test(text) || /upload timed out/i.test(text)) {
           setUploadBusy(false);
+          setUploadProgress(null);
         }
 
         setOutput((prev) => [
@@ -664,6 +707,7 @@ const Terminal = ({ client, socket }) => {
       if (payload && payload.clientId === client.id) {
         toast.error(payload.error || 'Upload failed');
         setUploadBusy(false);
+        setUploadProgress(null);
       }
     };
 
@@ -673,11 +717,23 @@ const Terminal = ({ client, socket }) => {
       }
     };
 
+    const handleUploadProgress = (payload) => {
+      if (!payload || payload.clientId !== client.id) return;
+      if (payload.done) {
+        setUploadProgress(null);
+        return;
+      }
+      if (payload.total > 0) {
+        setUploadProgress({ phase: 'send', sent: payload.sent, total: payload.total });
+      }
+    };
+
     socket.on('commandResponse', handleCommandResponse);
     socket.on('commandSent', handleCommandSent);
     socket.on('commandError', handleCommandError);
     socket.on('uploadError', handleUploadErr);
     socket.on('uploadQueued', handleUploadQueued);
+    socket.on('uploadProgress', handleUploadProgress);
 
     setIsConnected(true);
 
@@ -687,8 +743,14 @@ const Terminal = ({ client, socket }) => {
       socket.off('commandError', handleCommandError);
       socket.off('uploadError', handleUploadErr);
       socket.off('uploadQueued', handleUploadQueued);
+      socket.off('uploadProgress', handleUploadProgress);
     };
   }, [socket, client]);
+
+  useEffect(() => {
+    setUploadProgress(null);
+    setUploadBusy(false);
+  }, [client?.id]);
 
   useEffect(() => {
     if (outputRef.current) {
@@ -729,7 +791,13 @@ const Terminal = ({ client, socket }) => {
     const file = e.target.files && e.target.files[0];
     if (!file || !socket || !client) return;
     setUploadBusy(true);
+    setUploadProgress({ phase: 'read', loaded: 0, total: file.size });
     const reader = new FileReader();
+    reader.onprogress = (ev) => {
+      if (ev.lengthComputable) {
+        setUploadProgress({ phase: 'read', loaded: ev.loaded, total: ev.total });
+      }
+    };
     reader.onload = () => {
       try {
         const res = reader.result;
@@ -737,16 +805,19 @@ const Terminal = ({ client, socket }) => {
         const comma = str.indexOf(',');
         const base64 = comma >= 0 ? str.slice(comma + 1) : str;
         const remotePath = buildRemoteUploadPath(remoteCwd, file.name);
+        setUploadProgress({ phase: 'send', sent: 0, total: file.size });
         socket.emit('uploadBinaryToClient', { clientId: client.id, remotePath, fileBase64: base64 });
       } catch (err) {
         toast.error(err.message || 'Upload prepare failed');
         setUploadBusy(false);
+        setUploadProgress(null);
       }
       e.target.value = '';
     };
     reader.onerror = () => {
       toast.error('Could not read file');
       setUploadBusy(false);
+      setUploadProgress(null);
       e.target.value = '';
     };
     reader.readAsDataURL(file);
@@ -931,6 +1002,23 @@ const Terminal = ({ client, socket }) => {
               ? `→ ${remoteCwd}\\<filename>`
               : '→ (run pwd or cd to set folder; until then files use name only in implant cwd)'}
           </UploadPathHint>
+          {(uploadBusy || uploadProgress) && (
+            <UploadProgressRow>
+              <UploadProgressMeta>
+                <span>
+                  {uploadProgress?.phase === 'read'
+                    ? 'Reading file…'
+                    : uploadProgress?.phase === 'send'
+                      ? 'Sending to implant…'
+                      : 'Upload…'}
+                </span>
+                <span>{terminalUploadBarPercent(uploadProgress)}%</span>
+              </UploadProgressMeta>
+              <UploadProgressTrack>
+                <UploadProgressFill style={{ width: `${terminalUploadBarPercent(uploadProgress)}%` }} />
+              </UploadProgressTrack>
+            </UploadProgressRow>
+          )}
         </UploadToolbar>
 
         <InputArea>

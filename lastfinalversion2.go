@@ -972,7 +972,8 @@ func uploadFile(conn net.Conn, filename string) error {
 		return fmt.Errorf("failed to read file size: %v", err)
 	}
 	fileSize := int64(binary.LittleEndian.Uint64(sizeBytes))
-	_, err = io.CopyN(file, conn, fileSize)
+	copyBuf := make([]byte, 256*1024)
+	_, err = io.CopyBuffer(file, io.LimitReader(conn, fileSize), copyBuf)
 	if err != nil {
 		return fmt.Errorf("failed to read file data: %v", err)
 	}

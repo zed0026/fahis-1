@@ -43,6 +43,38 @@ function waitForResponse(socket, clientId, predicate, timeoutMs = 25000) {
   });
 }
 
+function fmUploadBarPercent(progress) {
+  if (!progress) return 0;
+  if (progress.phase === 'read' && progress.total > 0) {
+    return Math.min(28, Math.round((progress.loaded / progress.total) * 28));
+  }
+  if (progress.phase === 'send' && progress.total > 0) {
+    return 30 + Math.round((progress.sent / progress.total) * 70);
+  }
+  return 0;
+}
+
+function readFileAsBase64WithProgress(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (ev) => {
+      if (onProgress && ev.lengthComputable) onProgress(ev.loaded, ev.total);
+    };
+    reader.onload = () => {
+      try {
+        const str = String(reader.result);
+        const comma = str.indexOf(',');
+        const base64 = comma >= 0 ? str.slice(comma + 1) : str;
+        resolve(base64);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    reader.onerror = () => reject(new Error('Could not read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
 function quoteRemotePath(p, isWindows) {
   if (!p) return '""';
   const t = String(p).trim();
@@ -249,6 +281,36 @@ const Toolbar = styled.div`
   justify-content: space-between;
 `;
 
+const FmUploadProgressWrap = styled.div`
+  background: #121212;
+  border-bottom: 1px solid #2a2a2a;
+  padding: 8px 20px 12px;
+`;
+
+const FmUploadProgressMeta = styled.div`
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: #888;
+  font-family: 'Courier New', monospace;
+`;
+
+const FmUploadProgressTrack = styled.div`
+  height: 8px;
+  background: #2a2a2a;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid #333;
+`;
+
+const FmUploadProgressFill = styled.div`
+  height: 100%;
+  background: linear-gradient(90deg, #00ff88, #00aa66);
+  transition: width 0.15s ease-out;
+`;
+
 const ViewControls = styled.div`
   display: flex;
   align-items: center;
@@ -431,6 +493,9 @@ const FileManager = ({ client, socket }) => {
   const [loading, setLoading] = useState(false);
   const [breadcrumbs, setBreadcrumbs] = useState([]);
   const [osType, setOsType] = useState('windows');
+  const [fmUploadBusy, setFmUploadBusy] = useState(false);
+  const [fmUploadProgress, setFmUploadProgress] = useState(null);
+  const [fmUploadLabel, setFmUploadLabel] = useState('');
 
   const isWindowsOs = () =>
     String(osType).toLowerCase().includes('windows') || /^[A-Za-z]:\\?/.test(currentPath || '');
@@ -544,6 +609,39 @@ const FileManager = ({ client, socket }) => {
     };
   }, [client?.id, socket]);
 
+  useEffect(() => {
+    setFmUploadBusy(false);
+    setFmUploadProgress(null);
+    setFmUploadLabel('');
+  }, [client?.id]);
+
+  useEffect(() => {
+    if (!socket || !client) return;
+    const onUploadProgress = (payload) => {
+      if (!payload || payload.clientId !== client.id) return;
+      if (payload.done) {
+        setFmUploadProgress(null);
+        return;
+      }
+      if (payload.total > 0) {
+        setFmUploadProgress({ phase: 'send', sent: payload.sent, total: payload.total });
+      }
+    };
+    const onUploadErr = (payload) => {
+      if (payload && payload.clientId === client.id) {
+        setFmUploadBusy(false);
+        setFmUploadProgress(null);
+        setFmUploadLabel('');
+      }
+    };
+    socket.on('uploadProgress', onUploadProgress);
+    socket.on('uploadError', onUploadErr);
+    return () => {
+      socket.off('uploadProgress', onUploadProgress);
+      socket.off('uploadError', onUploadErr);
+    };
+  }, [socket, client]);
+
   const getFileIcon = (file) => {
     if (file.isDirectory) {
       return <FiFolder />;
@@ -599,35 +697,49 @@ const FileManager = ({ client, socket }) => {
     const input = document.createElement('input');
     input.type = 'file';
     input.multiple = true;
-    input.onchange = (ev) => {
+    input.onchange = async (ev) => {
       const picked = Array.from(ev.target.files || []);
-      picked.forEach((file) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          try {
-            const str = String(reader.result);
-            const comma = str.indexOf(',');
-            const base64 = comma >= 0 ? str.slice(comma + 1) : str;
-            const remotePath = (() => {
-              const sep = isWindowsOs() ? '\\' : '/';
-              const base = String(currentPath || '').replace(/[\\/]+$/, '');
-              const safe = file.name.replace(/[<>:"|?*]/g, '_');
-              return base ? `${base}${sep}${safe}` : safe;
-            })();
-            socket.emit('uploadBinaryToClient', {
-              clientId: client.id,
-              remotePath,
-              fileBase64: base64
-            });
-            toast.info(`Queued upload: ${file.name}`);
-          } catch (err) {
-            toast.error(err.message || 'Upload failed');
-          }
-        };
-        reader.onerror = () => toast.error(`Read failed: ${file.name}`);
-        reader.readAsDataURL(file);
-      });
       ev.target.value = '';
+      for (const file of picked) {
+        setFmUploadBusy(true);
+        setFmUploadLabel(file.name);
+        setFmUploadProgress({ phase: 'read', loaded: 0, total: file.size });
+        try {
+          const base64 = await readFileAsBase64WithProgress(file, (loaded, total) => {
+            setFmUploadProgress({ phase: 'read', loaded, total });
+          });
+          const remotePath = (() => {
+            const sep = isWindowsOs() ? '\\' : '/';
+            const base = String(currentPath || '').replace(/[\\/]+$/, '');
+            const safe = file.name.replace(/[<>:"|?*]/g, '_');
+            return base ? `${base}${sep}${safe}` : safe;
+          })();
+          setFmUploadProgress({ phase: 'send', sent: 0, total: file.size });
+          socket.emit('uploadBinaryToClient', {
+            clientId: client.id,
+            remotePath,
+            fileBase64: base64
+          });
+          toast.info(`Queued: ${file.name}`);
+          const waitMs = Math.min(900000, Math.max(120000, Math.floor(file.size / 1024) * 2000));
+          await waitForResponse(
+            socket,
+            client.id,
+            (text) =>
+              /upload complete/i.test(text) ||
+              /upload failed/i.test(text) ||
+              /upload timed out/i.test(text),
+            waitMs
+          );
+          toast.success(`Uploaded: ${file.name}`);
+        } catch (err) {
+          toast.error(err.message || `Upload failed: ${file.name}`);
+        } finally {
+          setFmUploadProgress(null);
+        }
+      }
+      setFmUploadBusy(false);
+      setFmUploadLabel('');
     };
     input.click();
   };
@@ -697,7 +809,7 @@ const FileManager = ({ client, socket }) => {
           Back
         </ActionButton>
         
-        <ActionButton onClick={handleFileUpload} className="primary">
+        <ActionButton onClick={handleFileUpload} className="primary" disabled={fmUploadBusy || loading}>
           <FiUpload />
           Upload
         </ActionButton>
@@ -720,6 +832,20 @@ const FileManager = ({ client, socket }) => {
         </ViewControls>
         </div>
       </Toolbar>
+
+      {(fmUploadBusy || fmUploadProgress) && (
+        <FmUploadProgressWrap>
+          <FmUploadProgressMeta>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '70%' }}>
+              {fmUploadLabel ? `Upload: ${fmUploadLabel}` : 'Upload…'}
+            </span>
+            <span>{fmUploadBarPercent(fmUploadProgress)}%</span>
+          </FmUploadProgressMeta>
+          <FmUploadProgressTrack>
+            <FmUploadProgressFill style={{ width: `${fmUploadBarPercent(fmUploadProgress)}%` }} />
+          </FmUploadProgressTrack>
+        </FmUploadProgressWrap>
+      )}
 
       <FileArea>
         {loading ? (
