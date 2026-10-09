@@ -3,13 +3,8 @@ import styled from 'styled-components';
 import { 
   FiHome, 
   FiUsers, 
-  FiTerminal, 
-  FiFolder, 
-  FiShield, 
-  FiCamera,
+  FiCpu,
   FiChevronRight,
-  FiMonitor,
-  FiActivity
 } from 'react-icons/fi';
 
 const SidebarContainer = styled.aside`
@@ -154,7 +149,8 @@ const Sidebar = ({
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: FiHome },
-    { id: 'users', label: 'User Management', icon: FiUsers }
+    { id: 'builder', label: 'Generate Implant', icon: FiCpu },
+    { id: 'users', label: 'User Management', icon: FiUsers },
   ];
 
   return (

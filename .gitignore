@@ -32,10 +32,14 @@ dist/
 build/
 client/build/
 
-# Environment variables
+# Environment variables (keep real secrets out of git)
 .env
-.env.*
+.env.local
+.env.production
+.env.*.local
 !.env.example
+!.env.example.local
+!.env.example.production
 
 # OS artifacts
 .DS_Store
@@ -64,6 +68,9 @@ temp/
 # Uploads and downloads
 uploads/
 downloads/
+
+# Polymorphic implant builds from dashboard
+builds/
 
 # Misc
 vendor/

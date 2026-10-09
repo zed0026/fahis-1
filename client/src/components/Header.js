@@ -157,7 +157,15 @@ const Header = ({
         <ViewTitle>
           {currentView === 'terminal' && selectedClient
             ? `Terminal — ${selectedClient.hostname}`
-            : currentView}
+            : currentView === 'dashboard'
+              ? 'Dashboard'
+              : currentView === 'builder'
+                ? 'Generate Implant'
+                : currentView === 'users'
+                  ? 'User Management'
+                  : currentView === 'session'
+                    ? 'Session'
+                    : currentView}
         </ViewTitle>
       </LeftSection>
 

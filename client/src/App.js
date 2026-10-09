@@ -13,6 +13,7 @@ import FileManager from './components/FileManager';
 import BrowserExtractor from './components/BrowserExtractor';
 import Screenshots from './components/Screenshots';
 import UserManagement from './components/UserManagement';
+import ImplantBuilder from './components/ImplantBuilder';
 
 import { useSocket } from './hooks/useSocket';
 import { useClients } from './hooks/useClients';
@@ -87,6 +88,8 @@ function App() {
         return <BrowserExtractor client={selectedClient} socket={socket} />;
       case 'screenshots':
         return <Screenshots client={selectedClient} socket={socket} />;
+      case 'builder':
+        return <ImplantBuilder />;
       case 'users':
         return <UserManagement />;
       default:
