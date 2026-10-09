@@ -43,7 +43,7 @@ const Title = styled.h1`
 `;
 
 const RefreshButton = styled.button`
-  background: linear-gradient(135deg, #00ff88, #00cc6a);
+  background: linear-gradient(135deg, #c6f23e, #8fb820);
   border: none;
   color: #000;
   padding: 12px 20px;
@@ -57,7 +57,7 @@ const RefreshButton = styled.button`
 
   &:hover {
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 255, 136, 0.3);
+    box-shadow: 0 4px 12px rgba(198, 242, 62, 0.3);
   }
 `;
 
@@ -69,17 +69,17 @@ const StatsGrid = styled.div`
 `;
 
 const StatCard = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+  background: #161a22;
   border-radius: 12px;
   padding: 20px;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   text-align: center;
 `;
 
 const StatValue = styled.div`
   font-size: 32px;
   font-weight: bold;
-  color: #00ff88;
+  color: #c6f23e;
   margin-bottom: 8px;
 `;
 
@@ -97,9 +97,9 @@ const ClientsGrid = styled.div`
 `;
 
 const ClientCard = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+  background: #161a22;
   border-radius: 12px;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   overflow: hidden;
   transition: all 0.3s;
   position: relative;
@@ -107,12 +107,12 @@ const ClientCard = styled.div`
   &:hover {
     transform: translateY(-4px);
     box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
-    border-color: #00ff88;
+    border-color: #c6f23e;
   }
 
   ${props => props.active && `
-    border-color: #00ff88;
-    box-shadow: 0 0 20px rgba(0, 255, 136, 0.2);
+    border-color: #c6f23e;
+    box-shadow: 0 0 20px rgba(198, 242, 62, 0.2);
   `}
 `;
 
@@ -155,9 +155,9 @@ const ClientActions = styled.div`
 `;
 
 const ActionButton = styled.button`
-  background: rgba(0, 255, 136, 0.2);
-  border: 1px solid #00ff88;
-  color: #00ff88;
+  background: rgba(198, 242, 62, 0.2);
+  border: 1px solid #c6f23e;
+  color: #c6f23e;
   padding: 6px 12px;
   border-radius: 6px;
   cursor: pointer;
@@ -168,11 +168,11 @@ const ActionButton = styled.button`
   transition: all 0.2s;
 
   &:hover {
-    background: rgba(0, 255, 136, 0.3);
+    background: rgba(198, 242, 62, 0.3);
   }
 
   &.primary {
-    background: linear-gradient(135deg, #00ff88, #00cc6a);
+    background: linear-gradient(135deg, #c6f23e, #8fb820);
     color: #000;
     border: none;
 
@@ -194,7 +194,7 @@ const InfoRow = styled.div`
   font-size: 14px;
 
   .icon {
-    color: #00ff88;
+    color: #c6f23e;
     width: 16px;
     flex-shrink: 0;
   }
@@ -265,7 +265,7 @@ const ModalContent = styled.div`
   max-height: 80vh;
   width: 90%;
   overflow-y: auto;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
 `;
 
 const ModalHeader = styled.div`
@@ -305,7 +305,7 @@ const HistorySection = styled.div`
 `;
 
 const SectionTitle = styled.h3`
-  color: #00ff88;
+  color: #c6f23e;
   font-size: 16px;
   font-weight: bold;
   margin-bottom: 12px;
@@ -319,7 +319,7 @@ const SessionItem = styled.div`
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 8px;
-  border-left: 3px solid #00ff88;
+  border-left: 3px solid #c6f23e;
 `;
 
 const SessionInfo = styled.div`
@@ -335,20 +335,20 @@ const SessionTime = styled.span`
 `;
 
 const SessionDuration = styled.span`
-  color: #00ff88;
+  color: #c6f23e;
   font-size: 12px;
   font-weight: 500;
 `;
 
 const CommandItem = styled.div`
-  background: rgba(0, 255, 136, 0.1);
+  background: rgba(198, 242, 62, 0.1);
   border-radius: 6px;
   padding: 8px 12px;
   margin: 4px 0;
   font-family: 'Courier New', monospace;
   font-size: 12px;
   color: #fff;
-  border-left: 2px solid #00ff88;
+  border-left: 2px solid #c6f23e;
 `;
 
 const CommandTime = styled.span`

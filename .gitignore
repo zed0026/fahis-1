@@ -68,4 +68,18 @@ downloads/
 # Misc
 vendor/
 
+# Windows reserved device names (cannot be indexed by git)
+nul
+nul.*
+NUL
+NUL.*
+
+# Local implant dumps / screenshots / archives (keep out of repo)
+snapshot_*.bmp
+*.bmp
+V3.zip
+svch*.zip
+Targets.txt
+CHANGES_SUMMARY.md
+
 

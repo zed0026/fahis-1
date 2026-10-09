@@ -15,7 +15,7 @@ import { toast } from 'react-toastify';
 const SettingsContainer = styled.div`
   background: #0a0a0a;
   border-radius: 12px;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   height: calc(100vh - 140px);
   display: flex;
   flex-direction: column;
@@ -41,7 +41,7 @@ const Title = styled.h1`
 `;
 
 const SaveButton = styled.button`
-  background: linear-gradient(135deg, #00ff88, #00cc6a);
+  background: linear-gradient(135deg, #c6f23e, #8fb820);
   border: none;
   color: #000;
   padding: 12px 20px;
@@ -55,7 +55,7 @@ const SaveButton = styled.button`
 
   &:hover {
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 255, 136, 0.3);
+    box-shadow: 0 4px 12px rgba(198, 242, 62, 0.3);
   }
 `;
 
@@ -72,10 +72,10 @@ const SettingsGrid = styled.div`
 `;
 
 const SettingsCard = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+  background: #161a22;
   border-radius: 12px;
   padding: 24px;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
 `;
 
 const CardTitle = styled.h3`
@@ -101,7 +101,7 @@ const SettingLabel = styled.label`
 
 const SettingInput = styled.input`
   background: #0a0a0a;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   color: #fff;
   padding: 12px 16px;
   border-radius: 8px;
@@ -111,7 +111,7 @@ const SettingInput = styled.input`
   transition: border-color 0.2s;
 
   &:focus {
-    border-color: #00ff88;
+    border-color: #c6f23e;
   }
 
   &::placeholder {
@@ -121,7 +121,7 @@ const SettingInput = styled.input`
 
 const SettingSelect = styled.select`
   background: #0a0a0a;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   color: #fff;
   padding: 12px 16px;
   border-radius: 8px;
@@ -131,7 +131,7 @@ const SettingSelect = styled.select`
   transition: border-color 0.2s;
 
   &:focus {
-    border-color: #00ff88;
+    border-color: #c6f23e;
   }
 
   option {
@@ -142,7 +142,7 @@ const SettingSelect = styled.select`
 
 const SettingTextarea = styled.textarea`
   background: #0a0a0a;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   color: #fff;
   padding: 12px 16px;
   border-radius: 8px;
@@ -155,7 +155,7 @@ const SettingTextarea = styled.textarea`
   font-family: inherit;
 
   &:focus {
-    border-color: #00ff88;
+    border-color: #c6f23e;
   }
 
   &::placeholder {
@@ -184,10 +184,10 @@ const StatusIndicator = styled.div`
 `;
 
 const InfoCard = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+  background: #161a22;
   border-radius: 12px;
   padding: 20px;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   margin-bottom: 20px;
 `;
 
@@ -307,7 +307,7 @@ const Settings = () => {
             Server Online - Port {settings.serverPort}
           </StatusIndicator>
           <InfoText>
-            FAHIS C2 Server is running and accepting connections. 
+            !0 is running and accepting connections. 
             All settings are applied in real-time.
           </InfoText>
         </InfoCard>

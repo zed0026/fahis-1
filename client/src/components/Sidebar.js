@@ -6,78 +6,68 @@ import {
   FiTerminal, 
   FiFolder, 
   FiShield, 
-  FiCamera, 
-  FiSettings,
+  FiCamera,
   FiChevronRight,
   FiMonitor,
   FiActivity
 } from 'react-icons/fi';
 
 const SidebarContainer = styled.aside`
-  width: ${props => props.open ? '280px' : '0'};
-  background: linear-gradient(180deg, #1a1a1a 0%, #0f0f0f 100%);
-  border-right: 1px solid #333;
-  height: calc(100vh - 60px);
+  width: ${props => props.open ? '260px' : '0'};
+  background: #12151c;
+  border-right: 1px solid #2a3140;
+  height: calc(100vh - 64px);
   position: fixed;
   left: 0;
-  top: 60px;
-  transition: width 0.3s ease;
+  top: 64px;
+  transition: width 0.28s ease;
   overflow: hidden;
   z-index: 999;
 `;
 
 const SidebarContent = styled.div`
-  padding: 20px 0;
+  padding: 18px 12px;
   height: 100%;
   overflow-y: auto;
+  width: 260px;
 `;
 
 const NavSection = styled.div`
-  margin-bottom: 30px;
+  margin-bottom: 28px;
 `;
 
 const SectionTitle = styled.h3`
-  color: #666;
-  font-size: 12px;
+  color: #5c657a;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 1px;
-  margin: 0 0 10px 20px;
-  font-weight: 500;
+  letter-spacing: 0.12em;
+  margin: 0 8px 10px;
+  font-weight: 600;
 `;
 
 const NavItem = styled.button`
   width: 100%;
-  background: none;
-  border: none;
-  color: ${props => props.active ? '#00ff88' : '#ccc'};
-  padding: 12px 20px;
+  background: ${props => props.active ? 'rgba(198, 242, 62, 0.12)' : 'transparent'};
+  border: 1px solid ${props => props.active ? 'rgba(198, 242, 62, 0.28)' : 'transparent'};
+  color: ${props => props.active ? '#c6f23e' : '#aeb6c7'};
+  padding: 11px 12px;
   text-align: left;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 12px;
   font-size: 14px;
-  transition: all 0.2s;
-  position: relative;
+  font-family: inherit;
+  font-weight: ${props => props.active ? 600 : 500};
+  border-radius: 10px;
+  margin-bottom: 4px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 
   &:hover {
-    background: rgba(0, 255, 136, 0.1);
-    color: #00ff88;
+    background: rgba(198, 242, 62, 0.08);
+    color: #c6f23e;
+    border-color: rgba(198, 242, 62, 0.18);
   }
-
-  ${props => props.active && `
-    background: rgba(0, 255, 136, 0.15);
-    
-    &::before {
-      content: '';
-      position: absolute;
-      left: 0;
-      top: 0;
-      bottom: 0;
-      width: 3px;
-      background: #00ff88;
-    }
-  `}
 
   .icon {
     font-size: 16px;
@@ -92,41 +82,38 @@ const NavItem = styled.button`
 `;
 
 const ClientsList = styled.div`
-  margin-top: 10px;
+  margin-top: 6px;
   max-height: 300px;
   overflow-y: auto;
 `;
 
 const ClientItem = styled.button`
   width: 100%;
-  background: none;
-  border: none;
-  color: #ccc;
-  padding: 8px 20px 8px 40px;
+  background: ${props => props.selected ? 'rgba(198, 242, 62, 0.1)' : 'transparent'};
+  border: 1px solid ${props => props.selected ? 'rgba(198, 242, 62, 0.22)' : 'transparent'};
+  color: ${props => props.selected ? '#c6f23e' : '#aeb6c7'};
+  padding: 10px 12px;
   text-align: left;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 10px;
   font-size: 13px;
-  transition: all 0.2s;
-  position: relative;
+  font-family: inherit;
+  border-radius: 10px;
+  margin-bottom: 4px;
+  transition: background 0.15s, color 0.15s;
 
   &:hover {
-    background: rgba(255, 255, 255, 0.05);
-    color: #fff;
+    background: rgba(255, 255, 255, 0.04);
+    color: #eef1f6;
   }
-
-  ${props => props.selected && `
-    background: rgba(0, 255, 136, 0.1);
-    color: #00ff88;
-  `}
 
   .status-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: ${props => props.active ? '#28a745' : '#dc3545'};
+    background: ${props => props.active ? '#5ddea0' : '#ff6b7a'};
     flex-shrink: 0;
   }
 
@@ -136,7 +123,7 @@ const ClientItem = styled.button`
   }
 
   .client-name {
-    font-weight: 500;
+    font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -144,7 +131,7 @@ const ClientItem = styled.button`
 
   .client-ip {
     font-size: 11px;
-    color: #888;
+    color: #8b93a7;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -156,24 +143,18 @@ const Sidebar = ({
   currentView, 
   onViewChange, 
   clients, 
-  onClientSelect 
+  onSessionSelect 
 }) => {
   const [selectedClient, setSelectedClient] = React.useState(null);
 
   const handleClientClick = (client) => {
     setSelectedClient(client);
-    onClientSelect(client);
+    onSessionSelect(client);
   };
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: FiHome },
-    { id: 'clients', label: 'Clients', icon: FiUsers },
-    { id: 'terminal', label: 'Terminal', icon: FiTerminal },
-    { id: 'files', label: 'File Manager', icon: FiFolder },
-    { id: 'browser', label: 'Browser Data', icon: FiShield },
-    { id: 'ransomware', label: 'Ransomware', icon: FiShield },
-    { id: 'screenshots', label: 'Screenshots', icon: FiCamera },
-    { id: 'settings', label: 'Settings', icon: FiSettings }
+    { id: 'users', label: 'User Management', icon: FiUsers }
   ];
 
   return (
@@ -201,37 +182,36 @@ const Sidebar = ({
 
         {clients.length > 0 && (
           <NavSection>
-            <SectionTitle>Connected Clients ({clients.length})</SectionTitle>
+            <SectionTitle>Sessions</SectionTitle>
             <ClientsList>
-              {clients.map(client => (
-                <ClientItem
-                  key={client.id}
-                  active={client.active}
-                  selected={selectedClient?.id === client.id}
-                  onClick={() => handleClientClick(client)}
-                >
-                  <div className="status-dot" />
-                  <div className="client-info">
-                    <div className="client-name">{client.hostname}</div>
-                    <div className="client-ip">{client.ip}</div>
-                  </div>
-                </ClientItem>
-              ))}
+              {clients.map(client => {
+                const sessionName = (() => {
+                  try {
+                    const names = JSON.parse(localStorage.getItem('sessionNames') || '{}');
+                    return names[client.id] || client.hostname;
+                  } catch {
+                    return client.hostname;
+                  }
+                })();
+                
+                return (
+                  <ClientItem
+                    key={client.id}
+                    active={client.active}
+                    selected={selectedClient?.id === client.id}
+                    onClick={() => handleClientClick(client)}
+                  >
+                    <div className="status-dot" />
+                    <div className="client-info">
+                      <div className="client-name">{sessionName}</div>
+                      <div className="client-ip">{client.ip}</div>
+                    </div>
+                  </ClientItem>
+                );
+              })}
             </ClientsList>
           </NavSection>
         )}
-
-        <NavSection>
-          <SectionTitle>System Status</SectionTitle>
-          <NavItem>
-            <FiActivity className="icon" />
-            <span>Server Online</span>
-          </NavItem>
-          <NavItem>
-            <FiMonitor className="icon" />
-            <span>Port 2026</span>
-          </NavItem>
-        </NavSection>
       </SidebarContent>
     </SidebarContainer>
   );

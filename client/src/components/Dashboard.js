@@ -1,336 +1,538 @@
-import React from 'react';
-import styled from 'styled-components';
-import { 
-  FiUsers, 
-  FiActivity, 
-  FiShield, 
-  FiMonitor,
-  FiTrendingUp,
-  FiAlertCircle,
-  FiCheckCircle,
-  FiClock
-} from 'react-icons/fi';
+import React, { useMemo, useState } from 'react';
+import styled, { keyframes } from 'styled-components';
+import { FiEdit3, FiTrash2, FiTerminal, FiChevronRight } from 'react-icons/fi';
+import { FaWindows, FaLinux } from 'react-icons/fa';
+import { toast } from 'react-toastify';
 
-const DashboardContainer = styled.div`
-  padding: 20px;
-  max-width: 1200px;
-  margin: 0 auto;
+const fadeIn = keyframes`
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 `;
 
-const WelcomeSection = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
-  border-radius: 12px;
-  padding: 30px;
-  margin-bottom: 30px;
-  border: 1px solid #333;
-  position: relative;
-  overflow: hidden;
+const Page = styled.div`
+  animation: ${fadeIn} 0.4s ease-out;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  min-height: calc(100vh - 120px);
+`;
 
-  &::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 3px;
-    background: linear-gradient(90deg, #00ff88, #00cc6a);
+const TopBar = styled.div`
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #2a3140;
+`;
+
+const Intro = styled.div`
+  .brand {
+    font-family: 'Syne', system-ui, sans-serif;
+    font-size: 40px;
+    font-weight: 800;
+    letter-spacing: -0.05em;
+    color: #c6f23e;
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+  .hint {
+    color: #8b93a7;
+    font-size: 14px;
   }
 `;
 
-const WelcomeTitle = styled.h1`
-  font-size: 28px;
-  font-weight: bold;
-  color: #fff;
-  margin-bottom: 10px;
+const Metrics = styled.div`
+  display: flex;
+  gap: 28px;
+  flex-wrap: wrap;
 `;
 
-const WelcomeSubtitle = styled.p`
-  color: #888;
-  font-size: 16px;
-  margin-bottom: 20px;
-`;
-
-const StatsGrid = styled.div`
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 20px;
-  margin-bottom: 30px;
-`;
-
-const StatCard = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
-  border-radius: 12px;
-  padding: 24px;
-  border: 1px solid #333;
-  transition: transform 0.2s, box-shadow 0.2s;
+const Metric = styled.button`
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  color: ${props => props.$active ? '#c6f23e' : '#eef1f6'};
+  opacity: ${props => props.$active ? 1 : 0.72};
+  transition: opacity 0.15s, color 0.15s;
 
   &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+    opacity: 1;
+    color: #c6f23e;
+  }
+
+  .num {
+    font-family: 'Syne', system-ui, sans-serif;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .lbl {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #8b93a7;
   }
 `;
 
-const StatHeader = styled.div`
+const Layout = styled.div`
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 28px;
+  flex: 1;
+
+  @media (max-width: 860px) {
+    grid-template-columns: 1fr;
+  }
+`;
+
+const FilterCol = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+`;
+
+const FilterBtn = styled.button`
+  background: ${props => props.$active ? 'rgba(198, 242, 62, 0.12)' : 'transparent'};
+  border: 1px solid ${props => props.$active ? 'rgba(198, 242, 62, 0.3)' : 'transparent'};
+  color: ${props => props.$active ? '#c6f23e' : '#aeb6c7'};
+  border-radius: 10px;
+  padding: 12px 14px;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
+  gap: 10px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+  &:hover {
+    color: #c6f23e;
+    background: rgba(198, 242, 62, 0.08);
+  }
+
+  .count {
+    font-size: 12px;
+    color: #8b93a7;
+    font-weight: 500;
+  }
 `;
 
-const StatIcon = styled.div`
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
-  background: ${props => props.color || 'linear-gradient(135deg, #00ff88, #00cc6a)'};
+const MainCol = styled.div`
+  min-width: 0;
+`;
+
+const TableHead = styled.div`
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr 0.8fr 1.1fr 140px;
+  gap: 12px;
+  padding: 0 4px 12px;
+  border-bottom: 1px solid #2a3140;
+  color: #5c657a;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 600;
+
+  @media (max-width: 980px) {
+    display: none;
+  }
+`;
+
+const Row = styled.div`
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr 0.8fr 1.1fr 140px;
+  gap: 12px;
+  align-items: center;
+  padding: 16px 4px;
+  border-bottom: 1px solid #1e2430;
+  cursor: pointer;
+  transition: background 0.15s;
+
+  &:hover {
+    background: rgba(198, 242, 62, 0.04);
+  }
+
+  @media (max-width: 980px) {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 16px 0;
+  }
+`;
+
+const NameCell = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+
+  .os {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    background: ${props => props.$os === 'windows' ? 'rgba(0, 120, 212, 0.2)' : 'rgba(255, 107, 53, 0.18)'};
+    color: ${props => props.$os === 'windows' ? '#4da3ff' : '#ff8f5c'};
+  }
+
+  .meta {
+    min-width: 0;
+  }
+
+  .name {
+    font-weight: 600;
+    color: #eef1f6;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .host {
+    font-size: 12px;
+    color: #8b93a7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+`;
+
+const Cell = styled.div`
+  color: #c5cad6;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+`;
+
+const Status = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: ${props => props.$on ? '#5ddea0' : '#ff6b7a'};
+
+  &::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+`;
+
+const RowActions = styled.div`
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+`;
+
+const IconBtn = styled.button`
+  background: #161a22;
+  border: 1px solid #2a3140;
+  color: #aeb6c7;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #000;
-  font-size: 20px;
-`;
-
-const StatValue = styled.div`
-  font-size: 32px;
-  font-weight: bold;
-  color: #fff;
-  margin-bottom: 4px;
-`;
-
-const StatLabel = styled.div`
-  color: #888;
-  font-size: 14px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-`;
-
-const StatChange = styled.div`
-  font-size: 12px;
-  color: ${props => props.positive ? '#28a745' : '#dc3545'};
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 8px;
-`;
-
-const ClientsSection = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
-  border-radius: 12px;
-  padding: 24px;
-  border: 1px solid #333;
-`;
-
-const SectionTitle = styled.h2`
-  font-size: 20px;
-  font-weight: 600;
-  color: #fff;
-  margin-bottom: 20px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-`;
-
-const ClientsList = styled.div`
-  display: grid;
-  gap: 12px;
-`;
-
-const ClientCard = styled.div`
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid #333;
-  border-radius: 8px;
-  padding: 16px;
   cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 16px;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
 
   &:hover {
-    background: rgba(0, 255, 136, 0.1);
-    border-color: #00ff88;
+    border-color: #c6f23e;
+    color: #c6f23e;
+  }
+
+  &.danger:hover {
+    border-color: #ff6b7a;
+    color: #ff6b7a;
   }
 `;
 
-const ClientStatus = styled.div`
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: ${props => props.active ? '#28a745' : '#dc3545'};
-  flex-shrink: 0;
-`;
-
-const ClientInfo = styled.div`
-  flex: 1;
-`;
-
-const ClientName = styled.div`
-  font-weight: 500;
-  color: #fff;
-  margin-bottom: 4px;
-`;
-
-const ClientDetails = styled.div`
-  font-size: 12px;
-  color: #888;
-  display: flex;
-  gap: 16px;
-`;
-
-const ClientActions = styled.div`
-  display: flex;
-  gap: 8px;
-`;
-
-const ActionButton = styled.button`
-  background: rgba(0, 255, 136, 0.2);
-  border: 1px solid #00ff88;
-  color: #00ff88;
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-
-  &:hover {
-    background: rgba(0, 255, 136, 0.3);
-  }
-`;
-
-const EmptyState = styled.div`
-  text-align: center;
-  padding: 40px 20px;
-  color: #666;
-
-  .icon {
-    font-size: 48px;
-    margin-bottom: 16px;
-    opacity: 0.5;
-  }
+const Empty = styled.div`
+  padding: 64px 12px;
+  color: #8b93a7;
+  text-align: left;
 
   h3 {
-    font-size: 18px;
+    font-family: 'Syne', system-ui, sans-serif;
+    font-size: 22px;
+    font-weight: 700;
+    color: #eef1f6;
     margin-bottom: 8px;
-    color: #888;
+    letter-spacing: -0.02em;
   }
 
   p {
     font-size: 14px;
-    line-height: 1.5;
+    max-width: 420px;
+    line-height: 1.55;
   }
 `;
 
-const Dashboard = ({ clients, onClientSelect }) => {
-  const activeClients = clients.filter(client => client.active);
-  const totalClients = clients.length;
+const EditModal = styled.div`
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+`;
 
-  const stats = [
-    {
-      label: 'Total Clients',
-      value: totalClients,
-      icon: FiUsers,
-      color: 'linear-gradient(135deg, #007bff, #0056b3)',
-      change: '+2 this week',
-      positive: true
-    },
-    {
-      label: 'Active Sessions',
-      value: activeClients.length,
-      icon: FiActivity,
-      color: 'linear-gradient(135deg, #28a745, #1e7e34)',
-      change: activeClients.length > 0 ? 'All systems operational' : 'No active sessions',
-      positive: activeClients.length > 0
-    },
-    {
-      label: 'Security Status',
-      value: 'Secure',
-      icon: FiShield,
-      color: 'linear-gradient(135deg, #ffc107, #e0a800)',
-      change: 'Encrypted connections',
-      positive: true
-    },
-    {
-      label: 'Server Uptime',
-      value: '99.9%',
-      icon: FiMonitor,
-      color: 'linear-gradient(135deg, #17a2b8, #138496)',
-      change: 'Last 30 days',
-      positive: true
+const EditModalContent = styled.div`
+  background: #161a22;
+  border: 1px solid #2a3140;
+  border-radius: 14px;
+  padding: 24px;
+  width: 400px;
+  max-width: 90vw;
+
+  h3 {
+    color: #c6f23e;
+    margin: 0 0 14px;
+    font-family: 'Syne', system-ui, sans-serif;
+  }
+`;
+
+const EditInput = styled.input`
+  width: 100%;
+  background: #0e1014;
+  border: 1px solid #2a3140;
+  color: #fff;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 14px;
+  outline: none;
+  font-family: inherit;
+
+  &:focus {
+    border-color: #c6f23e;
+  }
+`;
+
+const ModalActions = styled.div`
+  display: flex;
+  gap: 10px;
+`;
+
+const ModalBtn = styled.button`
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid ${props => props.$primary ? '#c6f23e' : '#2a3140'};
+  background: ${props => props.$primary ? '#c6f23e' : 'transparent'};
+  color: ${props => props.$primary ? '#0e1014' : '#c5cad6'};
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+`;
+
+const Dashboard = ({ clients, onSessionSelect, onDeleteSession }) => {
+  const [filter, setFilter] = useState('all');
+  const [editingSession, setEditingSession] = useState(null);
+  const [editValue, setEditValue] = useState('');
+  const [sessionNames, setSessionNames] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('sessionNames') || '{}');
+    } catch {
+      return {};
     }
-  ];
+  });
+
+  const getOSType = (client) => {
+    const os = String(client?.os || '').toLowerCase().trim();
+    if (os.includes('linux') || os === 'darwin') return 'linux';
+    return 'windows';
+  };
+
+  const windowsClients = useMemo(
+    () => clients.filter((c) => getOSType(c) === 'windows'),
+    [clients]
+  );
+  const linuxClients = useMemo(
+    () => clients.filter((c) => getOSType(c) === 'linux'),
+    [clients]
+  );
+  const activeCount = clients.filter((c) => c.active).length;
+
+  const visible = useMemo(() => {
+    if (filter === 'windows') return windowsClients;
+    if (filter === 'linux') return linuxClients;
+    if (filter === 'online') return clients.filter((c) => c.active);
+    return clients;
+  }, [clients, filter, windowsClients, linuxClients]);
+
+  const getSessionName = (client) => sessionNames[client.id] || client.hostname;
+
+  const updateSessionName = (sessionId, name) => {
+    const next = { ...sessionNames, [sessionId]: name };
+    setSessionNames(next);
+    localStorage.setItem('sessionNames', JSON.stringify(next));
+    setEditingSession(null);
+  };
 
   return (
-    <DashboardContainer>
-      <WelcomeSection>
-        <WelcomeTitle>Welcome to FAHIS C2</WelcomeTitle>
-        <WelcomeSubtitle>
-          Command and Control Dashboard - Monitor and manage your connected clients
-        </WelcomeSubtitle>
-      </WelcomeSection>
+    <Page>
+      <TopBar>
+        <Intro>
+          <div className="brand">!0</div>
+          <div className="hint">Sessions connect here automatically when implants come online.</div>
+        </Intro>
+        <Metrics>
+          <Metric $active={filter === 'all'} onClick={() => setFilter('all')}>
+            <div className="num">{clients.length}</div>
+            <div className="lbl">Total</div>
+          </Metric>
+          <Metric $active={filter === 'online'} onClick={() => setFilter('online')}>
+            <div className="num">{activeCount}</div>
+            <div className="lbl">Online</div>
+          </Metric>
+          <Metric $active={filter === 'windows'} onClick={() => setFilter('windows')}>
+            <div className="num">{windowsClients.length}</div>
+            <div className="lbl">Windows</div>
+          </Metric>
+          <Metric $active={filter === 'linux'} onClick={() => setFilter('linux')}>
+            <div className="num">{linuxClients.length}</div>
+            <div className="lbl">Linux</div>
+          </Metric>
+        </Metrics>
+      </TopBar>
 
-      <StatsGrid>
-        {stats.map((stat, index) => {
-          const Icon = stat.icon;
-          return (
-            <StatCard key={index}>
-              <StatHeader>
-                <StatIcon color={stat.color}>
-                  <Icon />
-                </StatIcon>
-              </StatHeader>
-              <StatValue>{stat.value}</StatValue>
-              <StatLabel>{stat.label}</StatLabel>
-              <StatChange positive={stat.positive}>
-                <FiTrendingUp />
-                {stat.change}
-              </StatChange>
-            </StatCard>
-          );
-        })}
-      </StatsGrid>
+      <Layout>
+        <FilterCol>
+          <FilterBtn $active={filter === 'all'} onClick={() => setFilter('all')}>
+            All sessions <span className="count">{clients.length}</span>
+          </FilterBtn>
+          <FilterBtn $active={filter === 'online'} onClick={() => setFilter('online')}>
+            Online <span className="count">{activeCount}</span>
+          </FilterBtn>
+          <FilterBtn $active={filter === 'windows'} onClick={() => setFilter('windows')}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><FaWindows /> Windows</span>
+            <span className="count">{windowsClients.length}</span>
+          </FilterBtn>
+          <FilterBtn $active={filter === 'linux'} onClick={() => setFilter('linux')}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><FaLinux /> Linux</span>
+            <span className="count">{linuxClients.length}</span>
+          </FilterBtn>
+        </FilterCol>
 
-      <ClientsSection>
-        <SectionTitle>
-          <FiUsers />
-          Connected Clients
-        </SectionTitle>
-        
-        {clients.length === 0 ? (
-          <EmptyState>
-            <FiUsers className="icon" />
-            <h3>No Clients Connected</h3>
-            <p>
-              Start your Go client to establish a connection.<br />
-              Clients will appear here once they connect to the server.
-            </p>
-          </EmptyState>
-        ) : (
-          <ClientsList>
-            {clients.map(client => (
-              <ClientCard key={client.id} onClick={() => onClientSelect(client)}>
-                <ClientStatus active={client.active} />
-                <ClientInfo>
-                  <ClientName>{client.hostname}</ClientName>
-                  <ClientDetails>
-                    <span>IP: {client.ip}</span>
-                    <span>User: {client.username}</span>
-                    <span>MAC: {client.macAddress}</span>
-                    <span>Connected: {new Date(client.connectedAt).toLocaleString()}</span>
-                  </ClientDetails>
-                </ClientInfo>
-                <ClientActions>
-                  <ActionButton onClick={(e) => {
-                    e.stopPropagation();
-                    onClientSelect(client);
-                  }}>
-                    Connect
-                  </ActionButton>
-                </ClientActions>
-              </ClientCard>
-            ))}
-          </ClientsList>
-        )}
-      </ClientsSection>
-    </DashboardContainer>
+        <MainCol>
+          {visible.length === 0 ? (
+            <Empty>
+              <h3>No sessions yet</h3>
+              <p>Run an implant against this host. When it connects, it will show up in this list.</p>
+            </Empty>
+          ) : (
+            <>
+              <TableHead>
+                <div>Session</div>
+                <div>IP</div>
+                <div>User</div>
+                <div>Status</div>
+                <div>Last seen</div>
+                <div />
+              </TableHead>
+              {visible.map((client) => {
+                const osType = getOSType(client);
+                const OSIcon = osType === 'windows' ? FaWindows : FaLinux;
+                return (
+                  <Row key={client.id} onClick={() => onSessionSelect(client)}>
+                    <NameCell $os={osType}>
+                      <div className="os"><OSIcon /></div>
+                      <div className="meta">
+                        <div className="name">
+                          {getSessionName(client)}
+                          <FiChevronRight size={14} color="#5c657a" />
+                        </div>
+                        <div className="host">{client.hostname}</div>
+                      </div>
+                    </NameCell>
+                    <Cell>{client.ip}</Cell>
+                    <Cell>{client.username}</Cell>
+                    <Cell>
+                      <Status $on={!!client.active}>
+                        {client.active ? 'Connected' : 'Offline'}
+                      </Status>
+                    </Cell>
+                    <Cell>
+                      {new Date(client.lastSeen || client.connectedAt).toLocaleString()}
+                    </Cell>
+                    <RowActions onClick={(e) => e.stopPropagation()}>
+                      <IconBtn title="Open" onClick={() => onSessionSelect(client)}>
+                        <FiTerminal size={15} />
+                      </IconBtn>
+                      <IconBtn
+                        title="Rename"
+                        onClick={() => {
+                          setEditingSession(client.id);
+                          setEditValue(getSessionName(client));
+                        }}
+                      >
+                        <FiEdit3 size={15} />
+                      </IconBtn>
+                      <IconBtn
+                        className="danger"
+                        title="Delete"
+                        onClick={() => {
+                          if (!window.confirm(`Delete session "${getSessionName(client)}"?`)) return;
+                          if (typeof onDeleteSession === 'function') {
+                            onDeleteSession(client);
+                            toast.success('Session deleted');
+                          }
+                        }}
+                      >
+                        <FiTrash2 size={15} />
+                      </IconBtn>
+                    </RowActions>
+                  </Row>
+                );
+              })}
+            </>
+          )}
+        </MainCol>
+      </Layout>
+
+      {editingSession && (
+        <EditModal onClick={() => setEditingSession(null)}>
+          <EditModalContent onClick={(e) => e.stopPropagation()}>
+            <h3>Rename session</h3>
+            <EditInput
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              placeholder="Session name"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') updateSessionName(editingSession, editValue);
+              }}
+            />
+            <ModalActions>
+              <ModalBtn $primary onClick={() => updateSessionName(editingSession, editValue)}>
+                Save
+              </ModalBtn>
+              <ModalBtn onClick={() => setEditingSession(null)}>Cancel</ModalBtn>
+            </ModalActions>
+          </EditModalContent>
+        </EditModal>
+      )}
+    </Page>
   );
 };
 

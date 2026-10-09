@@ -16,7 +16,7 @@ import { toast } from 'react-toastify';
 const BrowserExtractorContainer = styled.div`
   background: #0a0a0a;
   border-radius: 12px;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   height: calc(100vh - 140px);
   display: flex;
   flex-direction: column;
@@ -42,7 +42,7 @@ const Title = styled.h1`
 `;
 
 const ActionButton = styled.button`
-  background: linear-gradient(135deg, #00ff88, #00cc6a);
+  background: linear-gradient(135deg, #c6f23e, #8fb820);
   border: none;
   color: #000;
   padding: 12px 20px;
@@ -56,7 +56,7 @@ const ActionButton = styled.button`
 
   &:hover {
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 255, 136, 0.3);
+    box-shadow: 0 4px 12px rgba(198, 242, 62, 0.3);
   }
 
   &:disabled {
@@ -73,11 +73,11 @@ const Content = styled.div`
 `;
 
 const InfoCard = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+  background: #161a22;
   border-radius: 12px;
   padding: 24px;
   margin-bottom: 20px;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
 `;
 
 const InfoTitle = styled.h3`
@@ -113,14 +113,14 @@ const ExtractionOptions = styled.div`
 `;
 
 const OptionCard = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+  background: #161a22;
   border-radius: 12px;
   padding: 20px;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   transition: all 0.2s;
 
   &:hover {
-    border-color: #00ff88;
+    border-color: #c6f23e;
     transform: translateY(-2px);
   }
 `;
@@ -135,7 +135,7 @@ const OptionHeader = styled.div`
 const OptionIcon = styled.div`
   width: 40px;
   height: 40px;
-  background: linear-gradient(135deg, #00ff88, #00cc6a);
+  background: linear-gradient(135deg, #c6f23e, #8fb820);
   border-radius: 8px;
   display: flex;
   align-items: center;
@@ -157,9 +157,9 @@ const OptionDescription = styled.p`
 `;
 
 const OptionButton = styled.button`
-  background: rgba(0, 255, 136, 0.2);
-  border: 1px solid #00ff88;
-  color: #00ff88;
+  background: rgba(198, 242, 62, 0.2);
+  border: 1px solid #c6f23e;
+  color: #c6f23e;
   padding: 10px 16px;
   border-radius: 6px;
   cursor: pointer;
@@ -171,15 +171,15 @@ const OptionButton = styled.button`
   width: 100%;
 
   &:hover {
-    background: rgba(0, 255, 136, 0.3);
+    background: rgba(198, 242, 62, 0.3);
   }
 `;
 
 const ResultsSection = styled.div`
-  background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+  background: #161a22;
   border-radius: 12px;
   padding: 20px;
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
 `;
 
 const ResultsTitle = styled.h3`
@@ -193,7 +193,7 @@ const ResultsTitle = styled.h3`
 
 const ResultItem = styled.div`
   background: rgba(255, 255, 255, 0.03);
-  border: 1px solid #333;
+  border: 1px solid #2a3140;
   border-radius: 8px;
   padding: 16px;
   margin-bottom: 12px;
@@ -420,7 +420,7 @@ const BrowserExtractor = ({ client, socket }) => {
               borderRadius: '6px', 
               fontFamily: 'monospace', 
               fontSize: '12px',
-              color: '#00ff88',
+              color: '#c6f23e',
               maxHeight: '200px',
               overflowY: 'auto',
               whiteSpace: 'pre-wrap'

