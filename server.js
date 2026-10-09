@@ -2551,6 +2551,7 @@ app.post('/api/builder/generate', requireAuth, async (req, res) => {
       host,
       port,
       outputName: body.outputName,
+      format: body.format || 'exe',
     });
     console.log(`[BUILDER] Done ${meta.id} sha256=${meta.sha256.slice(0, 12)}`);
     res.json({ success: true, build: meta });
