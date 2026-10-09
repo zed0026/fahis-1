@@ -5,7 +5,8 @@ import {
   FiTerminal,
   FiFolder,
   FiCamera,
-  FiShield
+  FiShield,
+  FiGlobe
 } from 'react-icons/fi';
 import { FaWindows, FaLinux } from 'react-icons/fa';
 
@@ -13,6 +14,7 @@ import Terminal from './Terminal';
 import FileManager from './FileManager';
 import Screenshots from './Screenshots';
 import BrowserExtractor from './BrowserExtractor';
+import SocksPanel from './SocksPanel';
 
 const fadeIn = keyframes`
   from { opacity: 0; transform: translateY(8px); }
@@ -194,7 +196,8 @@ const SessionView = ({ session, onBack, socket }) => {
     { id: 'terminal', label: 'Terminal', icon: FiTerminal },
     { id: 'files', label: 'Files', icon: FiFolder },
     { id: 'browser', label: 'Browser', icon: FiShield },
-    { id: 'screenshots', label: 'Screenshots', icon: FiCamera }
+    { id: 'screenshots', label: 'Screenshots', icon: FiCamera },
+    { id: 'socks', label: 'SOCKS5', icon: FiGlobe }
   ];
 
   const renderContent = () => {
@@ -207,6 +210,8 @@ const SessionView = ({ session, onBack, socket }) => {
         return <BrowserExtractor client={session} socket={socket} />;
       case 'screenshots':
         return <Screenshots client={session} socket={socket} />;
+      case 'socks':
+        return <SocksPanel client={session} socket={socket} />;
       default:
         return <Terminal client={session} socket={socket} />;
     }

