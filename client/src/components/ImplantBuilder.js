@@ -444,21 +444,50 @@ const ImplantBuilder = () => {
   };
 
   const handleDownload = async (id, fileName) => {
+    const token = localStorage.getItem('fahis_token') || localStorage.getItem('c2_token') || '';
+    if (!token) {
+      toast.error('Not logged in — refresh and sign in again');
+      return;
+    }
     try {
-      const res = await axios.get(`/api/builder/download/${id}`, {
-        headers: authHeaders(),
-        responseType: 'blob',
-      });
-      const url = window.URL.createObjectURL(new Blob([res.data]));
+      // Prefer direct link (?token=) — reliable for large EXE; avoids axios blob failures
+      const href = `/api/builder/download/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
       const a = document.createElement('a');
-      a.href = url;
+      a.href = href;
       a.download = fileName || 'implant';
+      a.rel = 'noopener';
       document.body.appendChild(a);
       a.click();
       a.remove();
-      window.URL.revokeObjectURL(url);
+      toast.success('Download started');
     } catch (e) {
-      toast.error('Download failed');
+      // Fallback: fetch → blob
+      try {
+        const res = await fetch(`/api/builder/download/${encodeURIComponent(id)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) {
+          let msg = `Download failed (${res.status})`;
+          try {
+            const j = await res.json();
+            if (j?.error) msg = j.error;
+          } catch (_) {}
+          toast.error(msg);
+          return;
+        }
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName || 'implant';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+        toast.success('Download started');
+      } catch (e2) {
+        toast.error(e2.message || 'Download failed');
+      }
     }
   };
 

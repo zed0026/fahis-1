@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
 import styled, { keyframes } from 'styled-components';
+import { toast } from 'react-toastify';
 import {
   FiArrowLeft,
   FiTerminal,
   FiFolder,
   FiCamera,
   FiShield,
-  FiGlobe
+  FiGlobe,
+  FiClock
 } from 'react-icons/fi';
 import { FaWindows, FaLinux } from 'react-icons/fa';
 
@@ -128,6 +130,52 @@ const Status = styled.span`
   }
 `;
 
+const SleepBar = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 4px;
+`;
+
+const SleepLabel = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #8b93a7;
+`;
+
+const SleepInput = styled.input`
+  width: 64px;
+  background: #12151c;
+  border: 1px solid #2a3140;
+  color: #eef1f6;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  &:focus { border-color: #c6f23e; }
+`;
+
+const SleepBtn = styled.button`
+  background: #161a22;
+  border: 1px solid #2a3140;
+  color: #c6f23e;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  &:hover { border-color: #c6f23e; }
+  &:disabled { opacity: 0.45; cursor: not-allowed; }
+`;
+
 const Tabs = styled.div`
   display: flex;
   gap: 4px;
@@ -175,6 +223,22 @@ const Content = styled.div`
 
 const SessionView = ({ session, onBack, socket }) => {
   const [activeTab, setActiveTab] = useState('terminal');
+  const [sleepSec, setSleepSec] = useState(5);
+  const [jitterPct, setJitterPct] = useState(0);
+
+  const applySleep = () => {
+    if (!socket || !session?.id || !session?.active) {
+      toast.error('Session offline');
+      return;
+    }
+    const sec = Math.max(0, Math.min(86400, Number(sleepSec) || 0));
+    const jit = Math.max(0, Math.min(99, Number(jitterPct) || 0));
+    socket.emit('executeCommand', {
+      clientId: session.id,
+      command: `sleep ${sec} ${jit}`,
+    });
+    toast.success(`Sleep set: ${sec}s / ${jit}% jitter`);
+  };
 
   if (!session) {
     return (
@@ -244,9 +308,32 @@ const SessionView = ({ session, onBack, socket }) => {
             </div>
           </Identity>
         </Left>
-        <Status $on={!!session.active}>
-          {session.active ? 'Connected' : 'Offline'}
-        </Status>
+        <SleepBar>
+          <SleepLabel><FiClock size={13} /> Sleep</SleepLabel>
+          <SleepInput
+            type="number"
+            min={0}
+            max={86400}
+            value={sleepSec}
+            onChange={(e) => setSleepSec(e.target.value)}
+            title="Reconnect delay (seconds)"
+          />
+          <SleepLabel>jitter%</SleepLabel>
+          <SleepInput
+            type="number"
+            min={0}
+            max={99}
+            value={jitterPct}
+            onChange={(e) => setJitterPct(e.target.value)}
+            title="Jitter 0-99%"
+          />
+          <SleepBtn type="button" onClick={applySleep} disabled={!session.active}>
+            Apply
+          </SleepBtn>
+          <Status $on={!!session.active}>
+            {session.active ? 'Connected' : 'Offline'}
+          </Status>
+        </SleepBar>
       </TopBar>
 
       <Tabs>

