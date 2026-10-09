@@ -2570,6 +2570,22 @@ app.get('/api/builder/download/:id', requireAuth, (req, res) => {
   }
 });
 
+app.delete('/api/builder/delete/:id', requireAuth, (req, res) => {
+  try {
+    console.log(`[BUILDER] Delete request for build ID: ${req.params.id}`);
+    const success = implantBuilder.deleteBuild(req.params.id);
+    if (!success) {
+      console.log(`[BUILDER] Build not found: ${req.params.id}`);
+      return res.status(404).json({ error: 'Build not found' });
+    }
+    console.log(`[BUILDER] Successfully deleted build: ${req.params.id}`);
+    res.json({ success: true });
+  } catch (e) {
+    console.error(`[BUILDER] Delete error for ${req.params.id}:`, e);
+    res.status(500).json({ error: e.message || 'Delete failed' });
+  }
+});
+
 // Serve React app
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
