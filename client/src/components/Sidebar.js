@@ -5,6 +5,7 @@ import {
   FiUsers, 
   FiCpu,
   FiChevronRight,
+  FiShuffle,
 } from 'react-icons/fi';
 
 const SidebarContainer = styled.aside`
@@ -150,6 +151,7 @@ const Sidebar = ({
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: FiHome },
     { id: 'builder', label: 'Generate Implant', icon: FiCpu },
+    { id: 'mutate', label: 'Signature Rotator', icon: FiShuffle },
     { id: 'users', label: 'User Management', icon: FiUsers },
   ];
 
