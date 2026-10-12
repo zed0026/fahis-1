@@ -108,6 +108,34 @@ const PlatformRow = styled.div`
   margin-bottom: 14px;
 `;
 
+const SubVariantRow = styled.div`
+  display: flex;
+  gap: 6px;
+  margin-bottom: 14px;
+`;
+
+const SubVariantBtn = styled.button`
+  flex: 1;
+  padding: 10px 8px;
+  border-radius: 8px;
+  border: 1px solid ${props => props.$active ? 'rgba(198, 242, 62, 0.28)' : '#2a3140'};
+  background: ${props => props.$active ? 'rgba(198, 242, 62, 0.08)' : '#12151c'};
+  color: ${props => props.$active ? '#e8f5a0' : '#8b93a7'};
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+
+  &:hover {
+    border-color: #3d4658;
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+`;
+
 const PlatformBtn = styled.button`
   flex: 1;
   display: flex;
@@ -164,6 +192,63 @@ const Note = styled.div`
   font-size: 12px;
   color: #8b93a7;
   line-height: 1.5;
+`;
+
+const SignCard = styled.div`
+  margin-top: 4px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid #2a3140;
+  background: #12151c;
+`;
+
+const SignHead = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+
+  label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #eef1f6;
+    text-transform: none;
+    letter-spacing: normal;
+    cursor: pointer;
+  }
+
+  input[type='checkbox'] {
+    width: 16px;
+    height: 16px;
+    accent-color: #c6f23e;
+  }
+`;
+
+const SignMeta = styled.div`
+  font-size: 11px;
+  color: #8b93a7;
+  line-height: 1.45;
+  margin-top: 8px;
+`;
+
+const LinkBtn = styled.button`
+  margin-top: 8px;
+  background: transparent;
+  border: 1px solid #2a3140;
+  color: #c6f23e;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  &:hover { border-color: #c6f23e; }
+  &:disabled { opacity: 0.45; cursor: not-allowed; }
 `;
 
 const BuildsHead = styled.div`
@@ -378,6 +463,7 @@ function formatBytes(n) {
 
 const ImplantBuilder = () => {
   const [platform, setPlatform] = useState('windows');
+  const [windowsVariant, setWindowsVariant] = useState('implant'); // implant | dcom
   const [arch, setArch] = useState('amd64');
   const [format, setFormat] = useState('exe');
   const [host, setHost] = useState('127.0.0.1');
@@ -387,12 +473,18 @@ const ImplantBuilder = () => {
   const [builds, setBuilds] = useState([]);
   const [helpExpanded, setHelpExpanded] = useState(false);
   const [helpTab, setHelpTab] = useState('windows');
+  const [signingInfo, setSigningInfo] = useState(null);
+  const [signSubject, setSignSubject] = useState('');
 
   const loadDefaults = useCallback(async () => {
     try {
       const res = await axios.get('/api/builder/defaults', { headers: authHeaders() });
       if (res.data?.host) setHost(res.data.host);
       if (res.data?.port) setPort(res.data.port);
+      if (res.data?.signing) {
+        setSigningInfo(res.data.signing);
+        setSignSubject((prev) => prev || res.data.signing.defaultSubject || '');
+      }
     } catch (e) {
       /* keep defaults */
     }
@@ -412,8 +504,10 @@ const ImplantBuilder = () => {
     loadBuilds();
   }, [loadDefaults, loadBuilds]);
 
+  const isDcom = platform === 'windows' && windowsVariant === 'dcom';
+
   const handleGenerate = async () => {
-    if (!host.trim()) {
+    if (!isDcom && !host.trim()) {
       toast.error('C2 host is required');
       return;
     }
@@ -423,19 +517,38 @@ const ImplantBuilder = () => {
         '/api/builder/generate',
         {
           platform,
+          variant: platform === 'windows' ? windowsVariant : 'implant',
           arch,
           format: platform === 'windows' ? format : 'exe',
-          host: host.trim(),
+          host: host.trim() || undefined,
           port: Number(port),
           outputName: outputName.trim() || undefined,
+          signCode: platform === 'windows',
+          signSubject: platform === 'windows' ? (signSubject.trim() || undefined) : undefined,
+          signAuto: true,
+          buildNonce: typeof crypto !== 'undefined' && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `${Date.now()}_${Math.random()}`,
         },
         { headers: authHeaders(), timeout: 300000 }
       );
       const b = res.data?.build;
-      toast.success(
-        `${platform} build ready — signature ${b?.sha256?.slice(0, 10) || ''}…`
-      );
+      if (isDcom && b?.tool !== 'go-dcom') {
+        toast.error(
+          'Expected DCOM Go build (go-dcom) — pick "DCOM tool (Go)", restart node server, and hard-refresh the dashboard.'
+        );
+      } else if (b?.authenticodeSigned) {
+        toast.success(`Signed ${b.tool || 'build'} · sha256 ${b.sha256?.slice(0, 12) || '?'}…`);
+      } else if (platform === 'windows' && b?.signNote) {
+        toast.warn(`Build ready but unsigned: ${b.signNote} · ${b.sha256?.slice(0, 12) || ''}…`);
+      } else {
+        toast.success(`${b.tool || platform} ready · sha256 ${b.sha256?.slice(0, 12) || ''}…`);
+      }
       await loadBuilds();
+      try {
+        const st = await axios.get('/api/builder/signing/status', { headers: authHeaders() });
+        if (st.data) setSigningInfo(st.data);
+      } catch (_) {}
     } catch (e) {
       toast.error(e.response?.data?.error || e.message || 'Build failed');
     } finally {
@@ -489,6 +602,22 @@ const ImplantBuilder = () => {
         toast.error(e2.message || 'Download failed');
       }
     }
+  };
+
+  const handleDownloadLabCer = () => {
+    const token = localStorage.getItem('fahis_token') || localStorage.getItem('c2_token') || '';
+    if (!token) {
+      toast.error('Not logged in');
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = `/api/builder/signing/lab-cer?token=${encodeURIComponent(token)}`;
+    a.download = 'lab-codesign.cer';
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast.info('Import .cer on test VM → Trusted Root + Trusted Publishers');
   };
 
   const handleDelete = async (id, fileName) => {
@@ -577,8 +706,9 @@ const ImplantBuilder = () => {
         <div>
           <h2>Generate implant</h2>
           <p>
-            Build a fresh Windows or Linux binary from <code>lastfinalversion2.go</code>.
-            Every generation rotates XOR keys, shift, strings, and padding so the signature changes.
+            {isDcom
+              ? 'Build the Go DCOM module (GodPotato-style). Same toolchain as the C2 implant — obfuscated strings, unique build ID, and padding every generation.'
+              : 'Build a fresh Windows or Linux binary from lastfinalversion2.go. Every generation rotates XOR keys, shift, strings, and padding so the signature changes.'}
           </p>
         </div>
       </Head>
@@ -596,22 +726,53 @@ const ImplantBuilder = () => {
             <PlatformBtn
               type="button"
               $active={platform === 'linux'}
-              onClick={() => setPlatform('linux')}
+              onClick={() => {
+                setPlatform('linux');
+                setWindowsVariant('implant');
+              }}
             >
               <FaLinux /> Linux
             </PlatformBtn>
           </PlatformRow>
 
+          {platform === 'windows' && (
+            <SubVariantRow>
+              <SubVariantBtn
+                type="button"
+                $active={windowsVariant === 'implant'}
+                onClick={() => setWindowsVariant('implant')}
+                disabled={busy}
+              >
+                C2 implant (Go)
+              </SubVariantBtn>
+              <SubVariantBtn
+                type="button"
+                $active={windowsVariant === 'dcom'}
+                onClick={() => {
+                  setWindowsVariant('dcom');
+                  if (arch !== 'amd64') setArch('amd64');
+                }}
+                disabled={busy}
+              >
+                DCOM tool (Go)
+              </SubVariantBtn>
+            </SubVariantRow>
+          )}
+
           <Field>
             Architecture
-            <Select value={arch} onChange={(e) => setArch(e.target.value)}>
+            <Select
+              value={arch}
+              onChange={(e) => setArch(e.target.value)}
+              disabled={isDcom}
+            >
               <option value="amd64">amd64 (x64)</option>
               <option value="386">386 (x86)</option>
               <option value="arm64">arm64</option>
             </Select>
           </Field>
 
-          {platform === 'windows' && (
+          {platform === 'windows' && !isDcom && (
             <Field>
               Output format
               <Select value={format} onChange={(e) => setFormat(e.target.value)}>
@@ -622,21 +783,21 @@ const ImplantBuilder = () => {
           )}
 
           <Field>
-            C2 Host
+            {isDcom ? 'Default lhost (optional)' : 'C2 Host'}
             <Input
               value={host}
               onChange={(e) => setHost(e.target.value)}
-              placeholder="127.0.0.1 or your domain"
+              placeholder={isDcom ? 'Embedded -H default (runtime flags override)' : '127.0.0.1 or your domain'}
             />
           </Field>
 
           <Field>
-            C2 Port
+            {isDcom ? 'Default lport (optional)' : 'C2 Port'}
             <Input
               type="number"
               value={port}
               onChange={(e) => setPort(e.target.value)}
-              min={1}
+              min={isDcom ? 0 : 1}
               max={65535}
             />
           </Field>
@@ -650,22 +811,61 @@ const ImplantBuilder = () => {
             />
           </Field>
 
+          {platform === 'windows' && (
+            <SignCard>
+              <SignMeta style={{ marginTop: 0 }}>
+                <strong style={{ color: '#aeb6c7' }}>Authenticode:</strong> every Windows EXE/DLL is signed
+                automatically when you generate (lab cert). Check File → Properties → Digital Signatures.
+                {signingInfo?.canSignWindows
+                  ? ''
+                  : signingInfo?.hostIsWindows
+                    ? ' Install Windows SDK (signtool) on this teamserver.'
+                    : ' Teamserver must run on Windows to sign.'}
+                {signingInfo?.pfxConfigured && (
+                  <> PFX: <code>{signingInfo.pfxFile}</code>.</>
+                )}
+              </SignMeta>
+              <Field style={{ marginBottom: 0, marginTop: 10 }}>
+                Publisher name (optional, first lab cert only)
+                <Input
+                  value={signSubject}
+                  onChange={(e) => setSignSubject(e.target.value)}
+                  placeholder="CN=Software Update Publisher, O=..."
+                  disabled={busy}
+                />
+              </Field>
+              <LinkBtn type="button" onClick={handleDownloadLabCer}>
+                Download trust cert (.cer) for test VM
+              </LinkBtn>
+            </SignCard>
+          )}
+
           <GenerateBtn type="button" onClick={handleGenerate} disabled={busy}>
             <FiCpu />
             {busy
               ? 'Building (unique signature)…'
-              : platform === 'windows'
-                ? format === 'dll'
-                  ? 'Generate Windows DLL'
-                  : 'Generate Windows EXE (+ inject DLL)'
-                : 'Generate Linux binary'}
+              : isDcom
+                ? 'Generate DCOM EXE (Go)'
+                : platform === 'windows'
+                  ? format === 'dll'
+                    ? 'Generate Windows DLL'
+                    : 'Generate Windows EXE (+ inject DLL)'
+                  : 'Generate Linux binary'}
           </GenerateBtn>
 
-          <Note>
-            Windows EXE builds embed a real inject DLL. After you connect, run{' '}
-            <code>migrate &lt;pid&gt;</code> — the session then lives inside that process
-            (kill the host PID to kill the session). Do not inject an .exe path.
-          </Note>
+          {isDcom ? (
+            <Note>
+              Standalone Go binary (no Crystal). CLI: <code>-c</code> command, <code>-H/-P</code> reverse shell,{' '}
+              <code>-u/-pw</code> add local admin, <code>-p</code> pipe name. Built with the same Go compiler as the implant.
+            </Note>
+          ) : (
+            <Note>
+              Windows EXE builds embed a real inject DLL. After you connect, run{' '}
+              <code>migrate &lt;pid&gt;</code> — the session then lives inside that process
+              (kill the host PID to kill the session). Do not inject an .exe path.
+            </Note>
+          )}
+
         </div>
 
         <div>
@@ -691,8 +891,11 @@ const ImplantBuilder = () => {
                     <div className="name">{b.fileName}</div>
                     <div className="sub">
                       {b.platform}/{b.arch}
+                      {b.variant === 'dcom' || b.tool === 'go-dcom' ? ' · go-dcom' : ''}
                       {b.format ? `/${b.format}` : ''}
-                      {b.injectDllPacked ? ' · migrate-ready' : ''} · {b.host}:{b.port} ·{' '}
+                      {b.injectDllPacked ? ' · migrate-ready' : ''}
+                      {b.authenticodeSigned ? ` · signed${b.signPublisher ? ` (${b.signPublisher.split(',')[0].replace('CN=', '')})` : ''}` : ''}
+                      {b.host ? ` · ${b.host}:${b.port}` : ''} ·{' '}
                       {formatBytes(b.size)} · {new Date(b.createdAt).toLocaleString()} ·{' '}
                       {b.sha256?.slice(0, 8)}
                     </div>

