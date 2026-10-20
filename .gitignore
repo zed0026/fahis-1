@@ -72,6 +72,10 @@ downloads/
 # Polymorphic implant builds from dashboard
 builds/
 
+# Downloaded LinPEAS source (auto-fetched on teamserver)
+linpeas.sh
+builder/templates/linpeas.sh
+
 # Misc
 vendor/
 

@@ -5,6 +5,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
+const https = require('https');
+const http = require('http');
+const { URL } = require('url');
 const {
   randomId,
   readManifest,
@@ -13,6 +16,16 @@ const {
 } = require('./polymorph');
 
 const ROOT = path.join(__dirname, '..');
+const LINPEAS_CACHE_DIR = path.join(ROOT, 'builder', 'templates');
+const LINPEAS_CACHE_FILE = path.join(LINPEAS_CACHE_DIR, 'linpeas.sh');
+
+const LINPEAS_DOWNLOAD_URLS = [
+  process.env.LINPEAS_URL,
+  'https://github.com/carlospolop/PEASS-ng/releases/latest/download/linpeas.sh',
+  'https://raw.githubusercontent.com/carlospolop/PEASS-ng/master/linPEAS/linpeas.sh',
+].filter(Boolean);
+
+let linpeasFetchPromise = null;
 
 function resolveLinpeasSrc() {
   const candidates = [
@@ -28,14 +41,112 @@ function resolveLinpeasSrc() {
   return null;
 }
 
-function linpeasSourceHint() {
+function linpeasSourceHint(extra) {
   const expected = path.resolve(path.join(ROOT, 'linpeas.sh'));
-  return (
-    'linpeas.sh not found on teamserver. Copy the official LinPEAS script to:\n' +
-    `  ${expected}\n` +
-    'Or set env LINPEAS_SRC=/full/path/to/linpeas.sh and restart Node.\n' +
-    '(Get linpeas.sh from PEASS-ng / HackTricks LinPEAS release — not bundled in git due to size.)'
-  );
+  let msg =
+    'linpeas.sh not found on teamserver. The server will try to download it automatically; if that fails:\n' +
+    `  • Copy linpeas.sh to ${expected}\n` +
+    `  • Or ${LINPEAS_CACHE_FILE}\n` +
+    '  • Or set LINPEAS_SRC or LINPEAS_URL and restart Node.\n' +
+    '  • Ensure outbound HTTPS to GitHub is allowed.';
+  if (extra) msg += `\n\n${extra}`;
+  return msg;
+}
+
+function looksLikeLinpeas(buf) {
+  if (!buf || buf.length < 50000) return false;
+  const head = buf.slice(0, 4000).toString('utf8');
+  if (/^\s*</.test(head) || head.includes('<!DOCTYPE') || head.includes('<html')) return false;
+  return /^#!\/|linpeas|linPEAS|PEASS/i.test(head);
+}
+
+function fetchUrlBytes(url, redirectsLeft = 6) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const req = lib.get(
+      url,
+      {
+        headers: {
+          'User-Agent': 'fahis-linpeas-builder/1.0',
+          Accept: '*/*',
+        },
+      },
+      (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          if (redirectsLeft <= 0) {
+            res.resume();
+            reject(new Error('Too many redirects'));
+            return;
+          }
+          const next = new URL(res.headers.location, url).href;
+          res.resume();
+          fetchUrlBytes(next, redirectsLeft - 1).then(resolve, reject);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+      }
+    );
+    req.on('error', reject);
+    req.setTimeout(180000, () => {
+      req.destroy(new Error('Download timeout'));
+    });
+  });
+}
+
+async function downloadLinpeasToCache() {
+  fs.mkdirSync(LINPEAS_CACHE_DIR, { recursive: true });
+  let lastErr = null;
+  for (const url of LINPEAS_DOWNLOAD_URLS) {
+    try {
+      console.log(`[LINPEAS] Fetching source: ${url}`);
+      const buf = await fetchUrlBytes(url);
+      if (!looksLikeLinpeas(buf)) {
+        throw new Error('Response is not a valid linpeas.sh script');
+      }
+      fs.writeFileSync(LINPEAS_CACHE_FILE, buf);
+      try {
+        fs.chmodSync(LINPEAS_CACHE_FILE, 0o644);
+      } catch (_) {}
+      console.log(`[LINPEAS] Cached ${buf.length} bytes at ${LINPEAS_CACHE_FILE}`);
+      return LINPEAS_CACHE_FILE;
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[LINPEAS] Fetch failed (${url}): ${e.message}`);
+    }
+  }
+  throw new Error(lastErr ? lastErr.message : 'All download URLs failed');
+}
+
+async function ensureLinpeasSrc() {
+  const existing = resolveLinpeasSrc();
+  if (existing) return existing;
+  if (process.env.LINPEAS_AUTO_FETCH === '0' || process.env.LINPEAS_AUTO_FETCH === 'false') {
+    throw new Error(linpeasSourceHint('Auto-download disabled (LINPEAS_AUTO_FETCH=0).'));
+  }
+  if (!linpeasFetchPromise) {
+    linpeasFetchPromise = downloadLinpeasToCache().finally(() => {
+      linpeasFetchPromise = null;
+    });
+  }
+  try {
+    return await linpeasFetchPromise;
+  } catch (e) {
+    throw new Error(linpeasSourceHint(`Auto-download failed: ${e.message}`));
+  }
 }
 
 const LINUX_ENUM_NAMES = [
@@ -109,7 +220,7 @@ function defaultLinpeasName() {
 }
 
 async function generateLinpeasBuild(options = {}) {
-  const linpeasPath = resolveLinpeasSrc();
+  const linpeasPath = resolveLinpeasSrc() || (await ensureLinpeasSrc());
   if (!linpeasPath) {
     throw new Error(linpeasSourceHint());
   }
@@ -163,4 +274,9 @@ async function generateLinpeasBuild(options = {}) {
   return meta;
 }
 
-module.exports = { generateLinpeasBuild, resolveLinpeasSrc, linpeasSourceHint };
+module.exports = {
+  generateLinpeasBuild,
+  resolveLinpeasSrc,
+  ensureLinpeasSrc,
+  linpeasSourceHint,
+};

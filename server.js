@@ -2707,8 +2707,11 @@ app.get('/api/builder/defaults', requireAuth, (req, res) => {
     );
     let linpeasAvailable = false;
     let linpeasHint = '';
+    let linpeasAutoFetch = true;
     try {
       const { resolveLinpeasSrc, linpeasSourceHint } = require('./builder/linpeas_build');
+      linpeasAutoFetch =
+        process.env.LINPEAS_AUTO_FETCH !== '0' && process.env.LINPEAS_AUTO_FETCH !== 'false';
       linpeasAvailable = !!resolveLinpeasSrc();
       if (!linpeasAvailable) linpeasHint = linpeasSourceHint();
     } catch (_) {}
@@ -2720,10 +2723,27 @@ app.get('/api/builder/defaults', requireAuth, (req, res) => {
       arches: ['amd64', '386', 'arm64'],
       signing: implantBuilder.getSigningStatus(),
       linpeasAvailable,
+      linpeasAutoFetch,
       linpeasHint: linpeasAvailable ? undefined : linpeasHint,
     });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Failed to load builder defaults' });
+  }
+});
+
+app.post('/api/builder/linpeas/ensure', requireAuth, async (req, res) => {
+  try {
+    const { resolveLinpeasSrc, ensureLinpeasSrc } = require('./builder/linpeas_build');
+    const existing = resolveLinpeasSrc();
+    if (existing) {
+      return res.json({ success: true, path: existing, cached: true });
+    }
+    const linpeasSrc = await ensureLinpeasSrc();
+    console.log(`[LINPEAS] Source ready: ${linpeasSrc}`);
+    res.json({ success: true, path: linpeasSrc, cached: false });
+  } catch (e) {
+    console.error('[LINPEAS] ensure failed:', e.message);
+    res.status(500).json({ error: e.message || 'Failed to fetch linpeas.sh' });
   }
 });
 

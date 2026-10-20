@@ -479,7 +479,8 @@ const ImplantBuilder = () => {
   const [signingInfo, setSigningInfo] = useState(null);
   const [signSubject, setSignSubject] = useState('');
   const [linpeasAvailable, setLinpeasAvailable] = useState(true);
-  const [linpeasHint, setLinpeasHint] = useState('');
+  const [linpeasAutoFetch, setLinpeasAutoFetch] = useState(true);
+  const [linpeasFetching, setLinpeasFetching] = useState(false);
 
   const loadDefaults = useCallback(async () => {
     try {
@@ -492,7 +493,9 @@ const ImplantBuilder = () => {
       }
       if (typeof res.data?.linpeasAvailable === 'boolean') {
         setLinpeasAvailable(res.data.linpeasAvailable);
-        setLinpeasHint(res.data.linpeasHint || '');
+      }
+      if (typeof res.data?.linpeasAutoFetch === 'boolean') {
+        setLinpeasAutoFetch(res.data.linpeasAutoFetch);
       }
     } catch (e) {
       /* keep defaults */
@@ -513,10 +516,37 @@ const ImplantBuilder = () => {
     loadBuilds();
   }, [loadDefaults, loadBuilds]);
 
+  const ensureLinpeasSource = useCallback(async (silent) => {
+    if (linpeasFetching) return false;
+    setLinpeasFetching(true);
+    try {
+      const res = await axios.post(
+        '/api/builder/linpeas/ensure',
+        {},
+        { headers: authHeaders(), timeout: 300000 }
+      );
+      if (res.data?.success) {
+        setLinpeasAvailable(true);
+        if (!silent) toast.success('LinPEAS source ready on teamserver');
+        return true;
+      }
+    } catch (e) {
+      if (!silent) toast.error(e.response?.data?.error || e.message || 'Could not fetch linpeas.sh');
+    } finally {
+      setLinpeasFetching(false);
+    }
+    return false;
+  }, [linpeasFetching]);
+
   const isDcom = platform === 'windows' && windowsVariant === 'dcom';
   const isWinpeas = platform === 'windows' && windowsVariant === 'winpeas';
   const isLinpeas = platform === 'linux' && linuxVariant === 'linpeas';
   const isScriptOnly = isLinpeas || isWinpeas;
+
+  useEffect(() => {
+    if (!isLinpeas || linpeasAvailable || !linpeasAutoFetch) return;
+    ensureLinpeasSource(true);
+  }, [isLinpeas, linpeasAvailable, linpeasAutoFetch, ensureLinpeasSource]);
 
   const handleGenerate = async () => {
     if (!isDcom && !isScriptOnly && !host.trim()) {
@@ -525,6 +555,13 @@ const ImplantBuilder = () => {
     }
     setBusy(true);
     try {
+      if (isLinpeas && !linpeasAvailable) {
+        const ok = await ensureLinpeasSource(true);
+        if (!ok) {
+          toast.error('LinPEAS source missing — check teamserver can reach GitHub or place linpeas.sh manually');
+          return;
+        }
+      }
       const res = await axios.post(
         '/api/builder/generate',
         {
@@ -934,9 +971,29 @@ const ImplantBuilder = () => {
               {!linpeasAvailable && (
                 <>
                   <span style={{ color: '#ff8a8a' }}>
-                    Teamserver missing <code>linpeas.sh</code> — place it next to <code>server.js</code> or set{' '}
-                    <code>LINPEAS_SRC</code>, then restart Node.
+                    {linpeasFetching
+                      ? 'Downloading official linpeas.sh to teamserver (first time may take a minute)…'
+                      : 'LinPEAS source not cached yet — auto-download on generate, or fetch now.'}
                   </span>
+                  {!linpeasFetching && linpeasAutoFetch && (
+                    <>
+                      {' '}
+                      <button
+                        type="button"
+                        style={{
+                          background: 'transparent',
+                          border: '1px solid #666',
+                          color: '#ccc',
+                          cursor: 'pointer',
+                          padding: '2px 8px',
+                          borderRadius: 4,
+                        }}
+                        onClick={() => ensureLinpeasSource(false)}
+                      >
+                        Fetch now
+                      </button>
+                    </>
+                  )}
                   <br />
                 </>
               )}
