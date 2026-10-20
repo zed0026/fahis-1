@@ -2705,6 +2705,13 @@ app.get('/api/builder/defaults', requireAuth, (req, res) => {
       settings.serverPort ||
       (appEnv === 'local' ? 2026 : 443)
     );
+    let linpeasAvailable = false;
+    let linpeasHint = '';
+    try {
+      const { resolveLinpeasSrc, linpeasSourceHint } = require('./builder/linpeas_build');
+      linpeasAvailable = !!resolveLinpeasSrc();
+      if (!linpeasAvailable) linpeasHint = linpeasSourceHint();
+    } catch (_) {}
     res.json({
       appEnv,
       host: defaultHost,
@@ -2712,6 +2719,8 @@ app.get('/api/builder/defaults', requireAuth, (req, res) => {
       platforms: ['windows', 'linux'],
       arches: ['amd64', '386', 'arm64'],
       signing: implantBuilder.getSigningStatus(),
+      linpeasAvailable,
+      linpeasHint: linpeasAvailable ? undefined : linpeasHint,
     });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Failed to load builder defaults' });

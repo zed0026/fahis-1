@@ -13,7 +13,30 @@ const {
 } = require('./polymorph');
 
 const ROOT = path.join(__dirname, '..');
-const LINPEAS_SRC = path.join(ROOT, 'linpeas.sh');
+
+function resolveLinpeasSrc() {
+  const candidates = [
+    process.env.LINPEAS_SRC,
+    path.join(ROOT, 'linpeas.sh'),
+    path.join(ROOT, 'builder', 'templates', 'linpeas.sh'),
+    path.join(__dirname, 'templates', 'linpeas.sh'),
+  ].filter(Boolean);
+  for (const p of candidates) {
+    const abs = path.resolve(String(p).trim());
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) return abs;
+  }
+  return null;
+}
+
+function linpeasSourceHint() {
+  const expected = path.resolve(path.join(ROOT, 'linpeas.sh'));
+  return (
+    'linpeas.sh not found on teamserver. Copy the official LinPEAS script to:\n' +
+    `  ${expected}\n` +
+    'Or set env LINPEAS_SRC=/full/path/to/linpeas.sh and restart Node.\n' +
+    '(Get linpeas.sh from PEASS-ng / HackTricks LinPEAS release — not bundled in git due to size.)'
+  );
+}
 
 const LINUX_ENUM_NAMES = [
   'host_audit',
@@ -86,15 +109,16 @@ function defaultLinpeasName() {
 }
 
 async function generateLinpeasBuild(options = {}) {
-  if (!fs.existsSync(LINPEAS_SRC)) {
-    throw new Error('linpeas.sh not found in project root');
+  const linpeasPath = resolveLinpeasSrc();
+  if (!linpeasPath) {
+    throw new Error(linpeasSourceHint());
   }
 
   const id = randomId();
   const stamp = crypto.randomBytes(32).toString('hex');
   const buildid = crypto.randomBytes(16).toString('hex');
 
-  const raw = fs.readFileSync(LINPEAS_SRC, 'utf8');
+  const raw = fs.readFileSync(linpeasPath, 'utf8');
   const mutated = mutateLinpeasSource(raw, stamp);
   const gz = zlib.gzipSync(Buffer.from(mutated, 'utf8'), { level: 9 });
   const gzB64 = gz.toString('base64');
@@ -139,4 +163,4 @@ async function generateLinpeasBuild(options = {}) {
   return meta;
 }
 
-module.exports = { generateLinpeasBuild };
+module.exports = { generateLinpeasBuild, resolveLinpeasSrc, linpeasSourceHint };

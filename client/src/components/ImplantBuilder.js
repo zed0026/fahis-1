@@ -478,6 +478,8 @@ const ImplantBuilder = () => {
   const [helpTab, setHelpTab] = useState('windows');
   const [signingInfo, setSigningInfo] = useState(null);
   const [signSubject, setSignSubject] = useState('');
+  const [linpeasAvailable, setLinpeasAvailable] = useState(true);
+  const [linpeasHint, setLinpeasHint] = useState('');
 
   const loadDefaults = useCallback(async () => {
     try {
@@ -487,6 +489,10 @@ const ImplantBuilder = () => {
       if (res.data?.signing) {
         setSigningInfo(res.data.signing);
         setSignSubject((prev) => prev || res.data.signing.defaultSubject || '');
+      }
+      if (typeof res.data?.linpeasAvailable === 'boolean') {
+        setLinpeasAvailable(res.data.linpeasAvailable);
+        setLinpeasHint(res.data.linpeasHint || '');
       }
     } catch (e) {
       /* keep defaults */
@@ -925,6 +931,15 @@ const ImplantBuilder = () => {
             </Note>
           ) : isLinpeas ? (
             <Note>
+              {!linpeasAvailable && (
+                <>
+                  <span style={{ color: '#ff8a8a' }}>
+                    Teamserver missing <code>linpeas.sh</code> — place it next to <code>server.js</code> or set{' '}
+                    <code>LINPEAS_SRC</code>, then restart Node.
+                  </span>
+                  <br />
+                </>
+              )}
               Obfuscated <code>.sh</code> from <code>linpeas.sh</code>. Run on target:{' '}
               <code>chmod +x file.sh &amp;&amp; ./file.sh</code> (same LinPEAS flags: <code>-a</code>, <code>-s</code>, etc.).
               Authorized testing only.
