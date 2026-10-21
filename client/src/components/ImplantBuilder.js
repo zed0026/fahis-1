@@ -469,8 +469,9 @@ const ImplantBuilder = () => {
   const [linuxVariant, setLinuxVariant] = useState('implant'); // implant | linpeas
   const [arch, setArch] = useState('amd64');
   const [format, setFormat] = useState('exe');
-  const [host, setHost] = useState('127.0.0.1');
+  const [host, setHost] = useState('');
   const [port, setPort] = useState(2026);
+  const [appEnv, setAppEnv] = useState('local');
   const [outputName, setOutputName] = useState('');
   const [busy, setBusy] = useState(false);
   const [builds, setBuilds] = useState([]);
@@ -485,7 +486,9 @@ const ImplantBuilder = () => {
   const loadDefaults = useCallback(async () => {
     try {
       const res = await axios.get('/api/builder/defaults', { headers: authHeaders() });
+      if (res.data?.appEnv) setAppEnv(res.data.appEnv);
       if (res.data?.host) setHost(res.data.host);
+      else if (res.data?.appEnv === 'local') setHost('127.0.0.1');
       if (res.data?.port) setPort(res.data.port);
       if (res.data?.signing) {
         setSigningInfo(res.data.signing);
@@ -550,7 +553,20 @@ const ImplantBuilder = () => {
 
   const handleGenerate = async () => {
     if (!isDcom && !isScriptOnly && !host.trim()) {
-      toast.error('C2 host is required');
+      toast.error(
+        appEnv === 'local'
+          ? 'C2 host is required'
+          : 'C2 host required — set BUILD_C2_HOST in .env.production on the VPS and restart the server'
+      );
+      return;
+    }
+    if (
+      appEnv !== 'local' &&
+      !isDcom &&
+      !isScriptOnly &&
+      (host.trim() === '127.0.0.1' || host.trim() === 'localhost')
+    ) {
+      toast.error('Use your public VPS IP/domain as C2 host, not 127.0.0.1');
       return;
     }
     setBusy(true);
@@ -876,9 +892,20 @@ const ImplantBuilder = () => {
                 <Input
                   value={host}
                   onChange={(e) => setHost(e.target.value)}
-                  placeholder={isDcom ? 'Embedded -H default (runtime flags override)' : '127.0.0.1 or your domain'}
+                  placeholder={
+                    isDcom
+                      ? 'Embedded -H default (runtime flags override)'
+                      : appEnv === 'local'
+                        ? '127.0.0.1 or your domain'
+                        : 'Public IP or domain (set BUILD_C2_HOST in .env)'
+                  }
                 />
               </Field>
+              {appEnv !== 'local' && !isDcom && !host.trim() && (
+                <Note style={{ marginTop: -8, color: '#ff8a8a' }}>
+                  Production: set <code>BUILD_C2_HOST</code> on the teamserver and restart Node — implants cannot use localhost.
+                </Note>
+              )}
 
               <Field>
                 {isDcom ? 'Default lport (optional)' : 'C2 Port'}

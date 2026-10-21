@@ -75,6 +75,8 @@ builds/
 # Downloaded LinPEAS source (auto-fetched on teamserver)
 linpeas.sh
 builder/templates/linpeas.sh
+winPEAS.bat
+builder/templates/winPEAS.bat
 
 # Misc
 vendor/

