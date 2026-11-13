@@ -254,7 +254,7 @@ export default function Login({ onLoggedIn }) {
           <Title>{step === 'login' ? 'Sign in' : 'Verify OTP'}</Title>
           <Sub>
             {step === 'login'
-              ? 'Sign in to C2, sessions, and Production Files (builds/working downloads)'
+              ? 'Sign in to C2 and sessions (artifacts: /artifacts2620/working)'
               : 'Check your email for the code'}
           </Sub>
         </Header>

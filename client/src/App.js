@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, useNavigate, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router } from 'react-router-dom';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
@@ -15,15 +15,10 @@ import Screenshots from './components/Screenshots';
 import UserManagement from './components/UserManagement';
 import ImplantBuilder from './components/ImplantBuilder';
 import ExeMutator from './components/ExeMutator';
-import WorkingArtifacts from './components/WorkingArtifacts';
-
 import { useSocket } from './hooks/useSocket';
 import { useClients } from './hooks/useClients';
-import { ARTIFACTS_PAGE_PATH } from './config/paths';
 
 function AppAuthenticated({ setToken }) {
-  const navigate = useNavigate();
-  const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedClient, setSelectedClient] = useState(null);
@@ -32,14 +27,6 @@ function AppAuthenticated({ setToken }) {
 
   const socket = useSocket(token);
   const { clients } = useClients(socket);
-
-  useEffect(() => {
-    if (location.pathname === '/working') {
-      navigate(ARTIFACTS_PAGE_PATH, { replace: true });
-      return;
-    }
-    if (location.pathname === ARTIFACTS_PAGE_PATH) setCurrentView('working');
-  }, [location.pathname, navigate]);
 
   // After PM2/Node restart each implant gets a new connection id; re-bind the open session by host+mac.
   useEffect(() => {
@@ -62,24 +49,16 @@ function AppAuthenticated({ setToken }) {
 
   const handleViewChange = (id) => {
     setCurrentView(id);
-    if (id === 'working') {
-      if (location.pathname !== ARTIFACTS_PAGE_PATH) navigate(ARTIFACTS_PAGE_PATH);
-    } else if (location.pathname === ARTIFACTS_PAGE_PATH) {
-      navigate('/');
-    }
   };
 
   const handleSessionSelect = (session) => {
     setSelectedSession(session);
     setSelectedClient(session);
     setCurrentView('session');
-    if (location.pathname === ARTIFACTS_PAGE_PATH) navigate('/');
   };
 
   const renderCurrentView = () => {
     switch (currentView) {
-      case 'working':
-        return <WorkingArtifacts />;
       case 'dashboard':
         return (
           <Dashboard

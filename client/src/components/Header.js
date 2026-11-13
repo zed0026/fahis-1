@@ -159,9 +159,7 @@ const Header = ({
             ? `Terminal — ${selectedClient.hostname}`
             : currentView === 'dashboard'
               ? 'Dashboard'
-              : currentView === 'working'
-                ? 'Production Files'
-                : currentView === 'builder'
+              : currentView === 'builder'
                 ? 'Generate Implant'
                 : currentView === 'mutate'
                   ? 'Signature Rotator'

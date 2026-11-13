@@ -3182,7 +3182,15 @@ app.delete('/api/builder/delete/:id', requireAuth, (req, res) => {
   }
 });
 
-// Serve React app
+const { registerArtifactsPortal } = require('./artifacts-portal');
+registerArtifactsPortal(app, {
+  jwtSecret: JWT_SECRET,
+  listWorkingArtifacts,
+  safeWorkingFilename,
+  workingDir: WORKING_BUILDS_DIR,
+});
+
+// Serve React app (artifacts2620 paths handled above)
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
 });
