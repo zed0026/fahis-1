@@ -29,15 +29,18 @@ function cookieSecureSuffix(req) {
   return '';
 }
 
-function setCookie(req, res, name, value, maxAgeSec) {
-  res.setHeader(
-    'Set-Cookie',
-    `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${cookieSecureSuffix(req)}`
-  );
+function cookieLine(req, name, value, maxAgeSec) {
+  const val = value == null ? '' : encodeURIComponent(String(value));
+  const max = maxAgeSec == null ? '' : `; Max-Age=${maxAgeSec}`;
+  return `${name}=${val}; Path=/; HttpOnly; SameSite=Lax${max}${cookieSecureSuffix(req)}`;
 }
 
-function clearCookie(res, name) {
-  res.setHeader('Set-Cookie', `${name}=; Path=/; HttpOnly; Max-Age=0`);
+function applyCookies(req, res, specs) {
+  const lines = specs.map((s) => {
+    if (s.clear) return `${s.name}=; Path=/; HttpOnly; Max-Age=0`;
+    return cookieLine(req, s.name, s.value, s.maxAge);
+  });
+  res.setHeader('Set-Cookie', lines);
 }
 
 function esc(s) {
@@ -51,7 +54,7 @@ function esc(s) {
 function artifactsConfig() {
   return {
     user: String(process.env.ARTIFACTS_USER || 'milauth').trim(),
-    password: String(process.env.ARTIFACTS_PASSWORD || 'Artifacts2620'),
+    password: String(process.env.ARTIFACTS_PASSWORD || 'Artifacts2620').trim(),
     favoriteAnswer: String(process.env.ARTIFACTS_FAVORITE_ANSWER || '202121').trim(),
     question: String(process.env.ARTIFACTS_QUESTION || 'Who is your favorite?').trim(),
   };
@@ -121,7 +124,6 @@ function loginFormHtml(errorMsg) {
   return `
     <h1>Sign in — working artifacts</h1>
     ${err}
-    <p style="font-size:13px;color:#888">Not C2 admin — use the artifacts account from .env (ARTIFACTS_USER / ARTIFACTS_PASSWORD).</p>
     <form method="post" action="${ARTIFACTS_BASE}/login">
       <label for="username">Username</label>
       <input type="text" name="username" id="username" autocomplete="username" required/>
@@ -189,8 +191,10 @@ function registerArtifactsPortal(app, opts) {
       return res.status(401).type('html').send(pageShell('Login', loginFormHtml('Invalid username or password.')));
     }
     const pending = jwt.sign({ purpose: 'artifacts_pending', sub: cfg.user }, jwtSecret, { expiresIn: '10m' });
-    setCookie(req, res, COOKIE_PENDING, pending, 600);
-    clearCookie(res, COOKIE_AUTH);
+    applyCookies(req, res, [
+      { name: COOKIE_PENDING, value: pending, maxAge: 600 },
+      { name: COOKIE_AUTH, clear: true },
+    ]);
     res.redirect(302, workingPath);
   });
 
@@ -211,15 +215,19 @@ function registerArtifactsPortal(app, opts) {
         </form>`;
       return res.status(401).type('html').send(pageShell('Verify', body));
     }
-    clearCookie(res, COOKIE_PENDING);
     const auth = jwt.sign({ purpose: 'artifacts_auth', sub: cfg.user }, jwtSecret, { expiresIn: '7d' });
-    setCookie(req, res, COOKIE_AUTH, auth, 7 * 86400);
+    applyCookies(req, res, [
+      { name: COOKIE_PENDING, clear: true },
+      { name: COOKIE_AUTH, value: auth, maxAge: 7 * 86400 },
+    ]);
     res.redirect(302, workingPath);
   });
 
   app.get(`${ARTIFACTS_BASE}/logout`, (req, res) => {
-    clearCookie(res, COOKIE_PENDING);
-    clearCookie(res, COOKIE_AUTH);
+    applyCookies(req, res, [
+      { name: COOKIE_PENDING, clear: true },
+      { name: COOKIE_AUTH, clear: true },
+    ]);
     res.redirect(302, workingPath);
   });
 
