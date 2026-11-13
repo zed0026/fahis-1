@@ -29,14 +29,65 @@ const {
 /** Stable folder for “grab the EXE here” — also under each build id in builds/<id>/ */
 const WORKING_DIR = path.join(BUILDS_DIR, 'working');
 
+function copyExeViaTemp(src, dest) {
+  const tmp = `${dest}.${process.pid}.tmp`;
+  fs.copyFileSync(src, tmp);
+  try {
+    fs.renameSync(tmp, dest);
+  } catch (e) {
+    try {
+      fs.unlinkSync(dest);
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      fs.renameSync(tmp, dest);
+    } catch (e2) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch (_) {
+        /* ignore */
+      }
+      throw e2;
+    }
+  }
+}
+
 function publishStealthExe(outPath, outName) {
   fs.mkdirSync(WORKING_DIR, { recursive: true });
   const named = path.join(WORKING_DIR, outName);
   const latest = path.join(WORKING_DIR, 'latest-stealth.exe');
-  fs.copyFileSync(outPath, named);
-  fs.copyFileSync(outPath, latest);
+  const copyOne = (dest) => {
+    try {
+      copyExeViaTemp(outPath, dest);
+    } catch (e) {
+      if (e.code === 'EBUSY' || e.code === 'EPERM') {
+        const buf = fs.readFileSync(outPath);
+        const tmp = `${dest}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, buf);
+        fs.renameSync(tmp, dest);
+      } else {
+        throw e;
+      }
+    }
+  };
+  copyOne(named);
+  let latestStealthExe = latest;
+  try {
+    copyOne(latest);
+  } catch (e) {
+    if (e.code === 'EBUSY' || e.code === 'EPERM') {
+      console.warn(
+        '[STEALTH] Could not update latest-stealth.exe (file in use). Use:',
+        named
+      );
+      latestStealthExe = named;
+    } else {
+      throw e;
+    }
+  }
   const metaPath = path.join(WORKING_DIR, 'latest-meta.json');
-  return { workingDir: WORKING_DIR, workingExe: named, latestStealthExe: latest, workingMetaPath: metaPath };
+  return { workingDir: WORKING_DIR, workingExe: named, latestStealthExe, workingMetaPath: metaPath };
 }
 
 async function ensureGarbleOnPath() {

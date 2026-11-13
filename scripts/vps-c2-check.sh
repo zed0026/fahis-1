@@ -15,8 +15,11 @@ for f in .env.production .env; do
   [ -f "$f" ] && echo "--- $f ---" && grep -E '^(TCP_|BUILD_|PORT=|APP_ENV)' "$f" 2>/dev/null || true
 done
 echo ""
-echo "[4] TCP ports in LISTEN (need 2026 or your TCP_PORT)"
-ss -tlnp | grep -E ':5000|:2026|:80|:443' || echo "none matched"
+echo "[4] TCP ports in LISTEN (implant must be 0.0.0.0:PORT not 127.0.0.1)"
+ss -tlnp | grep -E ':5000|:2026|:1443|:443' || echo "none matched"
+if ss -tlnp 2>/dev/null | grep -q '127.0.0.1:.*LISTEN.*node'; then
+  echo "WARNING: Node listening on 127.0.0.1 — external implants will NOT connect. Set TCP_HOST=0.0.0.0"
+fi
 echo ""
 echo "[5] Server startup lines (last 40 out)"
 pm2 logs fahis-1 --lines 40 --nostream 2>/dev/null | grep -E '\[TCP\]|\[C2\]|\[ENV\]|FATAL|Error' || echo "no TCP/C2 lines — check full: pm2 logs fahis-1"

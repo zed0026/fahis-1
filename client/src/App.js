@@ -39,6 +39,25 @@ function App() {
   const socket = useSocket(token);
   const { clients, loading, error } = useClients(socket);
 
+  // After PM2/Node restart each implant gets a new connection id; re-bind the open session by host+mac.
+  useEffect(() => {
+    if (!selectedSession?.id || !clients?.length) return;
+    const sameId = clients.find((c) => c.id === selectedSession.id && c.active);
+    if (sameId) return;
+    const host = String(selectedSession.hostname || '').toLowerCase();
+    const mac = String(selectedSession.macAddress || '').toLowerCase();
+    const rebound = clients.find((c) => {
+      if (!c?.active) return false;
+      if (String(c.hostname || '').toLowerCase() !== host) return false;
+      if (mac && String(c.macAddress || '').toLowerCase() !== mac) return false;
+      return true;
+    });
+    if (rebound) {
+      setSelectedSession(rebound);
+      setSelectedClient(rebound);
+    }
+  }, [clients, selectedSession?.id, selectedSession?.hostname, selectedSession?.macAddress]);
+
   const toggleSidebar = () => {
     setSidebarOpen(!sidebarOpen);
   };
