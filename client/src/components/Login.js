@@ -252,7 +252,11 @@ export default function Login({ onLoggedIn }) {
         <Header>
           <Logo>!0</Logo>
           <Title>{step === 'login' ? 'Sign in' : 'Verify OTP'}</Title>
-          <Sub>{step === 'login' ? 'Enter your credentials to continue' : 'Check your email for the code'}</Sub>
+          <Sub>
+            {step === 'login'
+              ? 'Sign in to C2, sessions, and Production Files (builds/working downloads)'
+              : 'Check your email for the code'}
+          </Sub>
         </Header>
 
         {error && <Error>{error}</Error>}

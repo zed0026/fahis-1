@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, useNavigate, useLocation } from 'react-router-dom';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
@@ -15,29 +15,26 @@ import Screenshots from './components/Screenshots';
 import UserManagement from './components/UserManagement';
 import ImplantBuilder from './components/ImplantBuilder';
 import ExeMutator from './components/ExeMutator';
+import WorkingArtifacts from './components/WorkingArtifacts';
 
 import { useSocket } from './hooks/useSocket';
 import { useClients } from './hooks/useClients';
 
-function App() {
+function AppAuthenticated({ setToken }) {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedClient, setSelectedClient] = useState(null);
   const [selectedSession, setSelectedSession] = useState(null);
-  const [token, setToken] = useState(() => {
-    const next = localStorage.getItem('fahis_token');
-    if (next) return next;
-    const legacy = localStorage.getItem('c2_token');
-    if (legacy) {
-      localStorage.setItem('fahis_token', legacy);
-      localStorage.removeItem('c2_token');
-      return legacy;
-    }
-    return '';
-  });
+  const token = localStorage.getItem('fahis_token') || '';
 
   const socket = useSocket(token);
-  const { clients, loading, error } = useClients(socket);
+  const { clients } = useClients(socket);
+
+  useEffect(() => {
+    if (location.pathname === '/working') setCurrentView('working');
+  }, [location.pathname]);
 
   // After PM2/Node restart each implant gets a new connection id; re-bind the open session by host+mac.
   useEffect(() => {
@@ -58,23 +55,26 @@ function App() {
     }
   }, [clients, selectedSession?.id, selectedSession?.hostname, selectedSession?.macAddress]);
 
-  const toggleSidebar = () => {
-    setSidebarOpen(!sidebarOpen);
-  };
-
-  const handleClientSelect = (client) => {
-    setSelectedClient(client);
-    setCurrentView('session');
+  const handleViewChange = (id) => {
+    setCurrentView(id);
+    if (id === 'working') {
+      if (location.pathname !== '/working') navigate('/working');
+    } else if (location.pathname === '/working') {
+      navigate('/');
+    }
   };
 
   const handleSessionSelect = (session) => {
     setSelectedSession(session);
     setSelectedClient(session);
     setCurrentView('session');
+    if (location.pathname === '/working') navigate('/');
   };
 
   const renderCurrentView = () => {
     switch (currentView) {
+      case 'working':
+        return <WorkingArtifacts />;
       case 'dashboard':
         return (
           <Dashboard
@@ -95,11 +95,13 @@ function App() {
           />
         );
       case 'session':
-        return <SessionView 
-          session={selectedSession} 
-          onBack={() => setCurrentView('dashboard')}
-          socket={socket}
-        />;
+        return (
+          <SessionView
+            session={selectedSession}
+            onBack={() => setCurrentView('dashboard')}
+            socket={socket}
+          />
+        );
       case 'terminal':
         return <Terminal client={selectedClient} socket={socket} />;
       case 'files':
@@ -131,61 +133,81 @@ function App() {
     }
   };
 
+  return (
+    <div className="App">
+      <Header
+        onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+        sidebarOpen={sidebarOpen}
+        currentView={currentView}
+        selectedClient={selectedClient}
+        onLogout={() => {
+          try {
+            localStorage.removeItem('fahis_token');
+          } catch (e) {}
+          setToken('');
+        }}
+      />
+
+      <div className="main-content" style={{ display: 'flex', height: 'calc(100vh - 64px)', marginTop: '64px' }}>
+        <Sidebar
+          open={sidebarOpen}
+          currentView={currentView}
+          onViewChange={handleViewChange}
+          clients={clients}
+          onSessionSelect={handleSessionSelect}
+        />
+
+        <main
+          className="content-area"
+          style={{
+            flex: 1,
+            padding: '20px',
+            overflow: 'auto',
+            backgroundColor: 'transparent',
+            transition: 'margin-left 0.28s ease',
+            marginLeft: sidebarOpen ? 260 : 0,
+          }}
+        >
+          {renderCurrentView()}
+        </main>
+      </div>
+
+      <ToastContainer
+        position="top-right"
+        autoClose={5000}
+        hideProgressBar={false}
+        newestOnTop={false}
+        closeOnClick
+        rtl={false}
+        pauseOnFocusLoss
+        draggable
+        pauseOnHover
+        theme="dark"
+      />
+    </div>
+  );
+}
+
+function App() {
+  const [token, setToken] = useState(() => {
+    const next = localStorage.getItem('fahis_token');
+    if (next) return next;
+    const legacy = localStorage.getItem('c2_token');
+    if (legacy) {
+      localStorage.setItem('fahis_token', legacy);
+      localStorage.removeItem('c2_token');
+      return legacy;
+    }
+    return '';
+  });
+
   if (!token) {
     return <Login onLoggedIn={(t) => setToken(t)} />;
   }
 
   return (
     <Router>
-      <div className="App">
-        <Header 
-          onToggleSidebar={toggleSidebar}
-          sidebarOpen={sidebarOpen}
-          currentView={currentView}
-          selectedClient={selectedClient}
-          onLogout={() => {
-            try { localStorage.removeItem('fahis_token'); } catch (e) {}
-            setToken('');
-          }}
-        />
-        
-        <div className="main-content" style={{ display: 'flex', height: 'calc(100vh - 64px)', marginTop: '64px' }}>
-          <Sidebar 
-            open={sidebarOpen}
-            currentView={currentView}
-            onViewChange={setCurrentView}
-            clients={clients}
-            onSessionSelect={handleSessionSelect}
-          />
-          
-          <main 
-            className="content-area"
-            style={{
-              flex: 1,
-              padding: '20px',
-              overflow: 'auto',
-              backgroundColor: 'transparent',
-              transition: 'margin-left 0.28s ease',
-              marginLeft: sidebarOpen ? 260 : 0
-            }}
-          >
-            {renderCurrentView()}
-          </main>
-        </div>
-
-        <ToastContainer
-          position="top-right"
-          autoClose={5000}
-          hideProgressBar={false}
-          newestOnTop={false}
-          closeOnClick
-          rtl={false}
-          pauseOnFocusLoss
-          draggable
-          pauseOnHover
-          theme="dark"
-        />
-      </div>
+      <AppAuthenticated setToken={setToken} />
     </Router>
   );
 }

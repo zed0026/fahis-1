@@ -2810,6 +2810,85 @@ app.post('/api/socks/stop', requireAuth, (req, res) => {
   }
 });
 
+// ---- Production working folder (builds/working) ----
+const WORKING_BUILDS_DIR = path.join(__dirname, 'builds', 'working');
+
+function safeWorkingFilename(name) {
+  const base = path.basename(String(name || '').trim());
+  if (!base || base === '.' || base === '..' || /[<>:"|?*\x00]/.test(base)) return null;
+  return base;
+}
+
+function listWorkingArtifacts() {
+  if (!fs.existsSync(WORKING_BUILDS_DIR)) {
+    return { meta: null, files: [], dir: WORKING_BUILDS_DIR };
+  }
+  let meta = null;
+  const metaPath = path.join(WORKING_BUILDS_DIR, 'latest-meta.json');
+  if (fs.existsSync(metaPath)) {
+    try {
+      meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    } catch (_) {
+      meta = null;
+    }
+  }
+  const files = fs
+    .readdirSync(WORKING_BUILDS_DIR)
+    .filter((f) => {
+      try {
+        return fs.statSync(path.join(WORKING_BUILDS_DIR, f)).isFile();
+      } catch (_) {
+        return false;
+      }
+    })
+    .map((f) => {
+      const abs = path.join(WORKING_BUILDS_DIR, f);
+      const st = fs.statSync(abs);
+      const lower = f.toLowerCase();
+      let kind = 'other';
+      if (lower.endsWith('.exe')) kind = 'exe';
+      else if (lower.endsWith('.dll')) kind = 'dll';
+      else if (lower.endsWith('.json')) kind = 'meta';
+      return {
+        name: f,
+        size: st.size,
+        updatedAt: st.mtime.toISOString(),
+        kind,
+      };
+    })
+    .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  return { meta, files, dir: WORKING_BUILDS_DIR };
+}
+
+app.get('/api/working/list', requireAuth, (req, res) => {
+  try {
+    res.json(listWorkingArtifacts());
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Failed to list working artifacts' });
+  }
+});
+
+app.get('/api/working/download/:filename', requireAuth, (req, res) => {
+  try {
+    const safe = safeWorkingFilename(req.params.filename);
+    if (!safe) return res.status(400).json({ error: 'Invalid filename' });
+    const abs = path.resolve(path.join(WORKING_BUILDS_DIR, safe));
+    if (!abs.startsWith(path.resolve(WORKING_BUILDS_DIR))) {
+      return res.status(400).json({ error: 'Invalid path' });
+    }
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    res.download(abs, safe, (err) => {
+      if (err && !res.headersSent) {
+        res.status(500).json({ error: err.message || 'Download failed' });
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Download failed' });
+  }
+});
+
 // ---- Polymorphic implant builder (Windows / Linux) ----
 const implantBuilder = require('./builder/polymorph');
 
