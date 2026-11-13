@@ -22,11 +22,17 @@ function parseCookies(req) {
   return out;
 }
 
-function setCookie(res, name, value, maxAgeSec) {
-  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+function cookieSecureSuffix(req) {
+  if (process.env.ARTIFACTS_COOKIE_SECURE === '1') return '; Secure';
+  const xf = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  if (xf === 'https') return '; Secure';
+  return '';
+}
+
+function setCookie(req, res, name, value, maxAgeSec) {
   res.setHeader(
     'Set-Cookie',
-    `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${secure}`
+    `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${cookieSecureSuffix(req)}`
   );
 }
 
@@ -108,9 +114,37 @@ function verifyAuth(req, secret) {
   return null;
 }
 
+function loginFormHtml(errorMsg) {
+  const err = errorMsg
+    ? `<p style="color:#f88">${esc(errorMsg)}</p>`
+    : '';
+  return `
+    <h1>Sign in — working artifacts</h1>
+    ${err}
+    <p style="font-size:13px;color:#888">Not C2 admin — use the artifacts account from .env (ARTIFACTS_USER / ARTIFACTS_PASSWORD).</p>
+    <form method="post" action="${ARTIFACTS_BASE}/login">
+      <label for="username">Username</label>
+      <input type="text" name="username" id="username" autocomplete="username" required/>
+      <label for="password">Password</label>
+      <input type="password" name="password" id="password" autocomplete="current-password" required/>
+      <button type="submit">Login</button>
+    </form>`;
+}
+
 function registerArtifactsPortal(app, opts) {
   const { jwtSecret, listWorkingArtifacts, safeWorkingFilename, workingDir } = opts;
   const workingPath = `${ARTIFACTS_BASE}/working`;
+  const loginPath = `${ARTIFACTS_BASE}/login`;
+
+  const sendLoginPage = (req, res, errorMsg) => {
+    res.type('html').send(pageShell('Login', loginFormHtml(errorMsg)));
+  };
+
+  app.get(loginPath, (req, res) => {
+    if (verifyAuth(req, jwtSecret)) return res.redirect(302, workingPath);
+    if (verifyPending(req, jwtSecret)) return res.redirect(302, workingPath);
+    sendLoginPage(req, res, '');
+  });
 
   app.get(workingPath, (req, res) => {
     if (!verifyAuth(req, jwtSecret)) {
@@ -125,16 +159,7 @@ function registerArtifactsPortal(app, opts) {
           </form>`;
         return res.type('html').send(pageShell('Verify', body));
       }
-      const body = `
-        <h1>Sign in — working artifacts</h1>
-        <form method="post" action="${ARTIFACTS_BASE}/login">
-          <label for="username">Username</label>
-          <input type="text" name="username" id="username" autocomplete="username" required/>
-          <label for="password">Password</label>
-          <input type="password" name="password" id="password" autocomplete="current-password" required/>
-          <button type="submit">Login</button>
-        </form>`;
-      return res.type('html').send(pageShell('Login', body));
+      return sendLoginPage(req, res, '');
     }
 
     const { files } = listWorkingArtifacts();
@@ -159,21 +184,12 @@ function registerArtifactsPortal(app, opts) {
     const cfg = artifactsConfig();
     const username = String(req.body?.username || '').trim();
     const password = String(req.body?.password || '');
-    if (username !== cfg.user || password !== cfg.password) {
-      const body = `
-        <h1>Sign in — working artifacts</h1>
-        <p style="color:#f88">Invalid username or password.</p>
-        <form method="post" action="${ARTIFACTS_BASE}/login">
-          <label for="username">Username</label>
-          <input type="text" name="username" id="username" required/>
-          <label for="password">Password</label>
-          <input type="password" name="password" id="password" required/>
-          <button type="submit">Login</button>
-        </form>`;
-      return res.status(401).type('html').send(pageShell('Login', body));
+    const userOk = username.toLowerCase() === cfg.user.toLowerCase();
+    if (!userOk || password !== cfg.password) {
+      return res.status(401).type('html').send(pageShell('Login', loginFormHtml('Invalid username or password.')));
     }
-    const pending = jwt.sign({ purpose: 'artifacts_pending', sub: username }, jwtSecret, { expiresIn: '10m' });
-    setCookie(res, COOKIE_PENDING, pending, 600);
+    const pending = jwt.sign({ purpose: 'artifacts_pending', sub: cfg.user }, jwtSecret, { expiresIn: '10m' });
+    setCookie(req, res, COOKIE_PENDING, pending, 600);
     clearCookie(res, COOKIE_AUTH);
     res.redirect(302, workingPath);
   });
@@ -197,7 +213,7 @@ function registerArtifactsPortal(app, opts) {
     }
     clearCookie(res, COOKIE_PENDING);
     const auth = jwt.sign({ purpose: 'artifacts_auth', sub: cfg.user }, jwtSecret, { expiresIn: '7d' });
-    setCookie(res, COOKIE_AUTH, auth, 7 * 86400);
+    setCookie(req, res, COOKIE_AUTH, auth, 7 * 86400);
     res.redirect(302, workingPath);
   });
 
