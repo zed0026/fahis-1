@@ -490,6 +490,56 @@ function ensureDatabaseSchema() {
       FOREIGN KEY (clientId) REFERENCES clients(id),
       FOREIGN KEY (sessionId) REFERENCES client_sessions(sessionId)
     );`);
+  db.run(`CREATE TABLE IF NOT EXISTS client_aliases (
+      hostKey TEXT PRIMARY KEY,
+      displayName TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );`);
+}
+
+function clientStableKey(hostname, macAddress) {
+  const h = String(hostname || '').trim().toLowerCase();
+  const m = String(macAddress || '').trim().toLowerCase();
+  if (!h && !m) return '';
+  return `${h}|${m}`;
+}
+
+function escapeSqlLiteral(s) {
+  return String(s || '').replace(/'/g, "''");
+}
+
+function getClientDisplayName(hostname, macAddress) {
+  const key = clientStableKey(hostname, macAddress);
+  if (!key) return '';
+  try {
+    const r = db.exec(`SELECT displayName FROM client_aliases WHERE hostKey = '${escapeSqlLiteral(key)}' LIMIT 1`);
+    if (r.length > 0 && r[0].values.length > 0) return String(r[0].values[0][0] || '');
+  } catch (e) {
+    console.error('[DB] getClientDisplayName:', e.message);
+  }
+  return '';
+}
+
+function setClientDisplayName(hostname, macAddress, displayName) {
+  const key = clientStableKey(hostname, macAddress);
+  const name = String(displayName || '').trim();
+  if (!key || !name) return false;
+  const now = new Date().toISOString();
+  try {
+    db.run(`INSERT OR REPLACE INTO client_aliases (hostKey, displayName, updatedAt)
+      VALUES ('${escapeSqlLiteral(key)}', '${escapeSqlLiteral(name)}', '${now}')`);
+    persistDb();
+    return true;
+  } catch (e) {
+    console.error('[DB] setClientDisplayName:', e.message);
+    return false;
+  }
+}
+
+function enrichClientDisplay(client) {
+  if (!client) return client;
+  const displayName = getClientDisplayName(client.hostname, client.macAddress);
+  return displayName ? { ...client, displayName } : client;
 }
 
 /**
@@ -1286,28 +1336,31 @@ function createTcpServer() {
         });
         
         // Notify GUI clients
-        io.emit('clientConnected', {
+        io.emit('clientConnected', enrichClientDisplay({
           id: clientId,
           hostname: clientInfo.hostname,
           username: clientInfo.username,
           macAddress: clientInfo.macAddress,
           ip: clientInfo.ip,
           os: clientInfo.os,
-          connectedAt: clientInfo.connectedAt
-        });
+          connectedAt: clientInfo.connectedAt,
+          active: true,
+        }));
 
         // Also broadcast refreshed clients list to ensure dashboard reflects the connection
-        const list = Array.from(clients.values()).map(c => ({
-          id: c.id,
-          hostname: c.hostname,
-          username: c.username,
-          macAddress: c.macAddress,
-          ip: c.ip,
-          os: c.os,
-          connectedAt: c.connectedAt,
-          lastSeen: c.lastSeen,
-          active: c.active
-        }));
+        const list = Array.from(clients.values()).map((c) =>
+          enrichClientDisplay({
+            id: c.id,
+            hostname: c.hostname,
+            username: c.username,
+            macAddress: c.macAddress,
+            ip: c.ip,
+            os: c.os,
+            connectedAt: c.connectedAt,
+            lastSeen: c.lastSeen,
+            active: c.active,
+          })
+        );
         io.emit('clientsList', list);
       } else if (message.type === 'response') {
         // Command response
@@ -1966,7 +2019,7 @@ io.on('connection', (socket) => {
   const mapClientForGui = (client) => {
     const osRaw = String(client.os || '').toLowerCase();
     const os = (!osRaw || osRaw === 'unknown') ? 'windows' : osRaw;
-    return {
+    return enrichClientDisplay({
       id: client.id,
       hostname: client.hostname,
       username: client.username,
@@ -1975,8 +2028,8 @@ io.on('connection', (socket) => {
       os,
       connectedAt: client.connectedAt,
       lastSeen: client.lastSeen,
-      active: client.active
-    };
+      active: client.active,
+    });
   };
 
   const clientsList = Array.from(clients.values()).map(mapClientForGui);
@@ -2458,8 +2511,45 @@ app.get('/api/clients', async (req, res) => {
     clientsMap.set(activeClient.id, activeClient);
   });
   
-  const mergedClients = Array.from(clientsMap.values());
+  const mergedClients = Array.from(clientsMap.values()).map(enrichClientDisplay);
   res.json(mergedClients);
+});
+
+app.put('/api/clients/display-name', requireAuth, async (req, res) => {
+  await loadDb();
+  const body = req.body || {};
+  const hostname = body.hostname;
+  const macAddress = body.macAddress;
+  const displayName = String(body.displayName || '').trim();
+  if (!displayName) return res.status(400).json({ error: 'displayName required' });
+  if (!clientStableKey(hostname, macAddress)) {
+    return res.status(400).json({ error: 'hostname or macAddress required' });
+  }
+  if (!setClientDisplayName(hostname, macAddress, displayName)) {
+    return res.status(500).json({ error: 'Failed to save display name' });
+  }
+  const hostKey = clientStableKey(hostname, macAddress);
+  io.emit('clientDisplayNameUpdated', {
+    hostKey,
+    hostname,
+    macAddress,
+    displayName,
+  });
+  const list = Array.from(clients.values()).map((c) =>
+    enrichClientDisplay({
+      id: c.id,
+      hostname: c.hostname,
+      username: c.username,
+      macAddress: c.macAddress,
+      ip: c.ip,
+      os: c.os,
+      connectedAt: c.connectedAt,
+      lastSeen: c.lastSeen,
+      active: c.active,
+    })
+  );
+  io.emit('clientsList', list);
+  res.json({ ok: true, hostKey, displayName });
 });
 
 app.get('/api/clients/:id/history', async (req, res) => {

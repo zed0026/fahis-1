@@ -183,14 +183,8 @@ const Sidebar = ({
             <SectionTitle>Sessions</SectionTitle>
             <ClientsList>
               {clients.map(client => {
-                const sessionName = (() => {
-                  try {
-                    const names = JSON.parse(localStorage.getItem('sessionNames') || '{}');
-                    return names[client.id] || client.hostname;
-                  } catch {
-                    return client.hostname;
-                  }
-                })();
+                const sessionName =
+                  String(client.displayName || '').trim() || client.hostname;
                 
                 return (
                   <ClientItem

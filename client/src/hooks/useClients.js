@@ -53,10 +53,22 @@ export const useClients = (socket) => {
       setClients(prev => prev.filter(c => c.id !== data.id));
     };
 
+    const hostKey = (c) =>
+      `${String(c?.hostname || '').toLowerCase()}|${String(c?.macAddress || '').toLowerCase()}`;
+
+    const handleDisplayNameUpdated = (data) => {
+      if (!data?.displayName) return;
+      const key = data.hostKey || hostKey(data);
+      setClients((prev) =>
+        prev.map((c) => (hostKey(c) === key ? { ...c, displayName: data.displayName } : c))
+      );
+    };
+
     socket.on('clientsList', handleClientsList);
     socket.on('clientConnected', handleClientConnected);
     socket.on('clientDisconnected', handleClientDisconnected);
     socket.on('clientRemoved', handleClientRemoved);
+    socket.on('clientDisplayNameUpdated', handleDisplayNameUpdated);
 
     // Request initial clients list
     socket.emit('getClients');
@@ -66,6 +78,7 @@ export const useClients = (socket) => {
       socket.off('clientConnected', handleClientConnected);
       socket.off('clientDisconnected', handleClientDisconnected);
       socket.off('clientRemoved', handleClientRemoved);
+      socket.off('clientDisplayNameUpdated', handleDisplayNameUpdated);
     };
   }, [socket]);
 

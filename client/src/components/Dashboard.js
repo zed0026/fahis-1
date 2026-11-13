@@ -1,8 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
+import axios from 'axios';
 import { FiEdit3, FiTrash2, FiTerminal, FiChevronRight } from 'react-icons/fi';
 import { FaWindows, FaLinux } from 'react-icons/fa';
 import { toast } from 'react-toastify';
+
+const authHeaders = () => ({
+  Authorization: `Bearer ${localStorage.getItem('fahis_token') || ''}`,
+});
 
 const fadeIn = keyframes`
   from { opacity: 0; transform: translateY(8px); }
@@ -349,14 +354,6 @@ const Dashboard = ({ clients, onSessionSelect, onDeleteSession }) => {
   const [filter, setFilter] = useState('all');
   const [editingSession, setEditingSession] = useState(null);
   const [editValue, setEditValue] = useState('');
-  const [sessionNames, setSessionNames] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem('sessionNames') || '{}');
-    } catch {
-      return {};
-    }
-  });
-
   const getOSType = (client) => {
     const os = String(client?.os || '').toLowerCase().trim();
     if (os.includes('linux') || os === 'darwin') return 'linux';
@@ -380,13 +377,31 @@ const Dashboard = ({ clients, onSessionSelect, onDeleteSession }) => {
     return clients;
   }, [clients, filter, windowsClients, linuxClients]);
 
-  const getSessionName = (client) => sessionNames[client.id] || client.hostname;
+  const getSessionName = (client) =>
+  String(client?.displayName || '').trim() || client?.hostname || 'Session';
 
-  const updateSessionName = (sessionId, name) => {
-    const next = { ...sessionNames, [sessionId]: name };
-    setSessionNames(next);
-    localStorage.setItem('sessionNames', JSON.stringify(next));
-    setEditingSession(null);
+  const updateSessionName = async (sessionId, name) => {
+    const client = clients.find((c) => c.id === sessionId);
+    const trimmed = String(name || '').trim();
+    if (!client || !trimmed) {
+      setEditingSession(null);
+      return;
+    }
+    try {
+      await axios.put(
+        '/api/clients/display-name',
+        {
+          hostname: client.hostname,
+          macAddress: client.macAddress,
+          displayName: trimmed,
+        },
+        { headers: authHeaders() }
+      );
+      toast.success('Session name saved');
+      setEditingSession(null);
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to save session name');
+    }
   };
 
   return (

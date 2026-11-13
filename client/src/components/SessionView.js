@@ -281,14 +281,8 @@ const SessionView = ({ session, onBack, socket }) => {
     }
   };
 
-  const sessionName = (() => {
-    try {
-      const names = JSON.parse(localStorage.getItem('sessionNames') || '{}');
-      return names[session.id] || session.hostname;
-    } catch {
-      return session.hostname;
-    }
-  })();
+  const sessionName =
+    String(session?.displayName || '').trim() || session?.hostname || 'Session';
 
   return (
     <Page>
