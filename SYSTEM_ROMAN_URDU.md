@@ -213,7 +213,7 @@ Har build unique chunk names / stamp — **sha256 alag**.
 
 ## 11. Purani / backup Go files
 
-Repo mein `V3.go`, `backup.go`, `code.go`, `v3backup.go` — **purane versions**; production builder **`lastfinalversion2.go`** use karta hai. In ko confuse mat karo current build se.
+Production implant source sirf **`lastfinalversion2.go`** — purane `V3.go` / `backup.go` copies hata diye gaye.
 
 ---
 
