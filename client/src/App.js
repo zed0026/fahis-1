@@ -19,6 +19,7 @@ import WorkingArtifacts from './components/WorkingArtifacts';
 
 import { useSocket } from './hooks/useSocket';
 import { useClients } from './hooks/useClients';
+import { ARTIFACTS_PAGE_PATH } from './config/paths';
 
 function AppAuthenticated({ setToken }) {
   const navigate = useNavigate();
@@ -33,8 +34,12 @@ function AppAuthenticated({ setToken }) {
   const { clients } = useClients(socket);
 
   useEffect(() => {
-    if (location.pathname === '/working') setCurrentView('working');
-  }, [location.pathname]);
+    if (location.pathname === '/working') {
+      navigate(ARTIFACTS_PAGE_PATH, { replace: true });
+      return;
+    }
+    if (location.pathname === ARTIFACTS_PAGE_PATH) setCurrentView('working');
+  }, [location.pathname, navigate]);
 
   // After PM2/Node restart each implant gets a new connection id; re-bind the open session by host+mac.
   useEffect(() => {
@@ -58,8 +63,8 @@ function AppAuthenticated({ setToken }) {
   const handleViewChange = (id) => {
     setCurrentView(id);
     if (id === 'working') {
-      if (location.pathname !== '/working') navigate('/working');
-    } else if (location.pathname === '/working') {
+      if (location.pathname !== ARTIFACTS_PAGE_PATH) navigate(ARTIFACTS_PAGE_PATH);
+    } else if (location.pathname === ARTIFACTS_PAGE_PATH) {
       navigate('/');
     }
   };
@@ -68,7 +73,7 @@ function AppAuthenticated({ setToken }) {
     setSelectedSession(session);
     setSelectedClient(session);
     setCurrentView('session');
-    if (location.pathname === '/working') navigate('/');
+    if (location.pathname === ARTIFACTS_PAGE_PATH) navigate('/');
   };
 
   const renderCurrentView = () => {

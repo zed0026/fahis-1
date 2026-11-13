@@ -3,6 +3,7 @@ import styled from 'styled-components';
 import axios from 'axios';
 import { toast } from 'react-toastify';
 import { FiCopy, FiDownload, FiPackage, FiRefreshCw } from 'react-icons/fi';
+import { ARTIFACTS_PAGE_PATH } from '../config/paths';
 
 const authHeaders = () => ({
   Authorization: `Bearer ${localStorage.getItem('fahis_token') || ''}`,
@@ -205,8 +206,12 @@ export default function WorkingArtifacts() {
         </h2>
         <p>
           Latest ops artifacts from <code>builds/working</code> on this server — stealth EXE,
-          inject DLL, and meta. Log in here, then download from any machine. Rebuild with{' '}
-          <code>npm run build:prod-exe</code> on the teamserver to refresh.
+          inject DLL, and meta. Bookmark{' '}
+          <code>
+            {typeof window !== 'undefined' ? window.location.origin : ''}
+            {ARTIFACTS_PAGE_PATH}
+          </code>{' '}
+          (login required). Rebuild with <code>npm run build:prod-exe</code> on the teamserver to refresh.
         </p>
       </Head>
 
