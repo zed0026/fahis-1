@@ -510,6 +510,12 @@ async function generateBuild(options = {}) {
     'utf8'
   );
 
+  fs.writeFileSync(
+    path.join(workDir, 'embedded_dll.go'),
+    `package main\n\nfunc embeddedInjectDLLBytes() []byte { return nil }\n`,
+    'utf8'
+  );
+
   const baseName = (options.outputName || defaultOutputBase(platform)).replace(/[<>:"/\\|?*\s]/g, '_');
   const outName = baseName;
   const outPath = path.join(workDir, outName);
